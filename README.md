@@ -9,7 +9,7 @@ A working prototype that shows what was decided, what is still open, and who dro
 
 This is a design exercise prototype and is not affiliated with Google.
 
-![Focus mode on the Q4 Launch thread. The marketing branch stays sharp, the engineering branch is dimmed, and the overview above lists the open question and the branch chips.](docs/screenshots/focus-branch.desktop.png)
+![The Q4 Launch thread with the catch-up banner, the overview with one open question and the branch chips, and the reply tree with audience drift badges.](docs/screenshots/thread-overview.desktop.png)
 
 ## The problem
 
