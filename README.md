@@ -9,7 +9,7 @@ A working prototype that shows what was decided, what is still open, and who dro
 
 This is a design exercise prototype and is not affiliated with Google.
 
-![Thread overview with the resolution ledger, branch chips and audience signals](docs/screenshots/thread-overview.desktop.png)
+![Focus mode on the Q4 Launch thread. The marketing branch stays sharp, the engineering branch is dimmed, and the overview above lists the open question and the branch chips.](docs/screenshots/focus-branch.desktop.png)
 
 ## The problem
 
