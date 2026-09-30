@@ -10,7 +10,7 @@
   const test = async (name, fn) => {
     if (only && !name.includes(only)) return;
     // unmount whatever the previous test left open (its composer flushes a draft on unmount), then wipe storage
-    try { window.__testApi.openThread(null); await sleep(60); localStorage.clear(); } catch {}
+    try { window.__testApi.openThread(null); await sleep(60); localStorage.clear(); window.__testApi.resetApp(); await sleep(30); } catch {}
     try { await fn(); results.push({ name, ok: true }); } catch (e) { results.push({ name, ok: false, error: String((e && e.message) || e) }); }
   };
 
@@ -27,6 +27,11 @@
   const sendBtn = (c) => $(".btn-primary", c);
   const MOBILE = innerWidth < 640, FLAT = MOBILE ? 2 : 3; // depth clamp: 3 on desktop, 2 on phones
   const announcer = () => ($("[data-announcer]") || {}).textContent || "";
+  const searchBox = () => $('input[aria-label="Search mail"]');
+  const navigateTo = async (route) => { G.navigate(route); await sleep(80); };
+  const listIds = () => $$("[data-row]").map((r) => r.dataset.row);
+  const toast = () => $("[data-toast]");
+  const dialog = () => $("[data-compose-dialog]");
   const showLedger = async () => { const t = $("[data-ledger-toggle]"); if (t && t.getAttribute("aria-expanded") !== "true") { t.click(); await waitFor(() => $("[data-ledger-toggle]").getAttribute("aria-expanded") === "true", "ledger expanded"); } };
   const ovItem = (part) => $$("[data-overview-item]").find(b => b.textContent.includes(part));
   const chip = (key) => $(`[data-status-for="${key}"]`);
@@ -1012,6 +1017,264 @@
     const de = document.documentElement;
     ok(de.scrollWidth <= innerWidth + 1, `page ${de.scrollWidth} > ${innerWidth}`); ok($("main").scrollWidth <= $("main").clientWidth + 1, "main overflow");
     for (const el of $$("[data-mid] *")) { const r = el.getBoundingClientRect(); if (r.width && r.right > innerWidth + 1) throw new Error("element leaks past the viewport: " + (el.getAttribute("data-delta-dropped") !== null ? "drift badge" : el.className.toString().slice(0, 60))); }
+  });
+
+
+  // Routing and deep links
+  await test("routing: opening a thread and going back are reflected in the URL hash and history", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    $('[data-thread="t1"]').click(); await waitFor(() => $("h1"), "thread");
+    eq(location.hash, "#/inbox/t1");
+    $('[aria-label="Back to Inbox"]').click(); await waitFor(() => $("[data-row]"), "list"); eq(location.hash, "#/inbox");
+    history.back(); await waitFor(() => $("h1"), "browser Back returns to the thread"); eq(location.hash, "#/inbox/t1");
+  });
+  await test("routing: deep links open the right folder, thread and search; unknown values degrade gracefully", async () => {
+    await restore();
+    location.hash = "#/sent/t3"; await waitFor(() => $("h1") && $("h1").textContent.includes("Homepage"), "deep link to a thread");
+    eq($('[aria-label="Back to Sent"]') !== null, true);
+    location.hash = "#/inbox?q=launch"; await waitFor(() => listIds().join() === "t1", "search in the URL"); eq(searchBox().value, "launch");
+    location.hash = "#/nonsense"; await waitFor(() => $('[data-folder="inbox"][aria-current="page"]'), "unknown folder falls back to inbox");
+    location.hash = "#/inbox/does-not-exist"; await waitFor(() => $("[data-not-found]"), "missing thread shows a message");
+    $("[data-not-found] button").click(); await waitFor(() => !$("[data-not-found]") && $("[data-row]"), "back to the list");
+    location.hash = "#/inbox/%E0%A4%A"; await waitFor(() => $("[data-not-found]"), "malformed percent-encoding does not crash");
+  });
+
+  // Folders
+  await test("folders: sidebar lists all six with aria-current; membership follows the rules", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    eq($$("[data-folder]").map((a) => a.dataset.folder), ["inbox", "starred", "sent", "drafts", "archived", "trash"]);
+    eq($$('[data-folder][aria-current="page"]').map((a) => a.dataset.folder), ["inbox"]);
+    eq(listIds(), ["t1", "t2", "t3"]);
+    await navigateTo({ folder: "sent" }); eq(listIds(), ["t1", "t3"], "threads where I wrote");
+    for (const [folder, text] of [["starred", "No starred"], ["drafts", "No drafts"], ["archived", "Nothing archived"], ["trash", "Trash is empty"]]) {
+      await navigateTo({ folder }); ok($("[data-empty]").textContent.includes(text), `${folder}: ${$("[data-empty]") && $("[data-empty]").textContent}`);
+    }
+  });
+  await test("folders: a saved reply draft puts the conversation in Drafts and raises the badge", async () => {
+    await restore(); await go("t1");
+    $("[data-reply-icon]", mid("3")).click(); const c = await waitFor(() => composer("3"), "composer"); setVal($("textarea", c), "half a thought");
+    key($("textarea", composer("3")), "Escape"); await waitFor(() => !composer("3"), "closed");
+    $('[aria-label="Back to Inbox"]').click(); await waitFor(() => $("[data-row]"), "list");
+    await waitFor(() => $('[data-count="drafts"]') && $('[data-count="drafts"]').textContent === "1", "drafts badge");
+    $('[data-folder="drafts"]').click(); await waitFor(() => listIds().join() === "t1", "draft thread listed");
+  });
+
+  // Star, archive, trash, undo
+  await test("star: toggles from the list and the thread, lists under Starred, and is stored", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    $('[data-star="t2"]').click(); await waitFor(() => $('[data-star="t2"]').getAttribute("aria-pressed") === "true", "starred");
+    ok($('[data-star="t2"]').getAttribute("aria-label").startsWith("Remove star from"));
+    ok(JSON.parse(localStorage.getItem("gmail-mailbox")).starred.t2 === true, "persisted");
+    await navigateTo({ folder: "starred" }); eq(listIds(), ["t2"]);
+    $('[data-thread="t2"]').click(); await waitFor(() => $("h1"), "thread");
+    eq($('[aria-label="Remove star"]').getAttribute("aria-pressed"), "true");
+    $('[aria-label="Remove star"]').click(); await waitFor(() => $('[aria-label="Add star"]'), "unstarred in thread");
+    await navigateTo({ folder: "starred" }); eq(listIds(), []);
+  });
+  await test("archive/trash: list buttons move the conversation, show a toast, and Undo puts it back", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    $(`[data-row="t2"] [aria-label^="Archive"]`).click(); await waitFor(() => listIds().join() === "t1,t3", "gone from inbox");
+    ok(toast().textContent.includes("Conversation archived"));
+    $("[data-toast-action]").click(); await waitFor(() => listIds().join() === "t1,t2,t3", "Undo restores it");
+    $(`[data-row="t3"] [aria-label^="Move"]`).click(); await waitFor(() => listIds().join() === "t1,t2", "trashed");
+    await navigateTo({ folder: "trash" }); eq(listIds(), ["t3"]);
+    await navigateTo({ folder: "sent" }); eq(listIds(), ["t1"], "trashed conversations disappear from every other folder");
+  });
+  await test("archive/trash from the thread: toolbar, e and # keys; archived shows 'Move to Inbox'; trash shows Restore", async () => {
+    await restore(); await go("t2");
+    $('[aria-label^="Archive"]').click(); await waitFor(() => $("[data-row]") && !$("h1"), "returns to the list");
+    eq(listIds().includes("t2"), false); ok(toast().textContent.includes("archived"));
+    await navigateTo({ folder: "archived" }); eq(listIds(), ["t2"]);
+    $('[data-thread="t2"]').click(); await waitFor(() => $("h1"), "archived thread");
+    ok($('[aria-label="Move to Inbox"]') && !$('[aria-label^="Archive"]'), "archive becomes move-to-inbox");
+    $('[aria-label="Move to Inbox"]').click(); await waitFor(() => $("[data-row]") || $("[data-empty]"), "moved");
+    await navigateTo({ folder: "inbox" }); ok(listIds().includes("t2"));
+    $('[data-thread="t2"]').click(); await waitFor(() => $("h1"), "thread"); header("1").focus();
+    key(header("1"), "#"); await waitFor(() => !$("h1"), "# trashes and leaves the thread");
+    await navigateTo({ folder: "trash" }); $('[data-thread="t2"]').click(); await waitFor(() => $("h1"), "trashed thread");
+    ok($('[aria-label="Restore to Inbox"]') && !$('[aria-label="Move to Trash (#)"]'), "only restore is offered in trash");
+    $('[aria-label="Restore to Inbox"]').click(); await waitFor(() => !$("h1"), "restored");
+    await navigateTo({ folder: "inbox" }); ok(listIds().includes("t2"));
+    $('[data-thread="t2"]').click(); await waitFor(() => $("h1"), "thread"); header("1").focus();
+    key(header("1"), "e"); await waitFor(() => !$("h1"), "e archives");
+  });
+  await test("archive: keys are ignored while typing in a reply", async () => {
+    await restore(); await go("t1");
+    $("[data-reply-icon]", mid("3")).click(); const c = await waitFor(() => composer("3"), "composer");
+    key($("textarea", c), "e"); key($("textarea", c), "#"); await sleep(80);
+    ok($("h1"), "still in the thread");
+  });
+
+  // Search
+  await test("search: filters the current folder live, keeps the query in the URL, and clears with Esc or the button", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    setVal(searchBox(), "lunch"); await waitFor(() => listIds().join() === "t2", "filtered"); ok(location.hash.includes("q=lunch"));
+    setVal(searchBox(), "from:luis"); await waitFor(() => listIds().join() === "t1", "from: operator");
+    setVal(searchBox(), "zzzz-nothing"); await waitFor(() => $("[data-empty]") && $("[data-empty]").textContent.includes("No conversations match"), "no results");
+    $("[data-empty] button").click(); await waitFor(() => listIds().length === 3 && searchBox().value === "", "Clear search");
+    setVal(searchBox(), "ramen"); await waitFor(() => listIds().join() === "t2", "body text matches");
+    searchBox().focus(); key(searchBox(), "Escape"); await waitFor(() => searchBox().value === "" && document.activeElement !== searchBox(), "Esc clears and blurs");
+    await navigateTo({ folder: "sent" }); setVal(searchBox(), "lunch"); await waitFor(() => $("[data-empty]"), "search respects the folder");
+  });
+  await test("search: '/' focuses it; quoted history and regex characters don't produce false hits or crashes", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    document.body.focus(); key(document.body, "/"); await waitFor(() => document.activeElement === searchBox(), "/ focuses search");
+    setVal(searchBox(), "(.*)["); await waitFor(() => $("[data-empty]"), "regex characters are plain text");
+    setVal(searchBox(), "\\"); await sleep(60); ok($("[data-empty]") || $("[data-row]"), "no crash");
+  });
+  await test("search: a malformed thread can neither break the list nor the search", async () => {
+    const bad = { id: "bad", subject: { toString() { throw new Error("boom"); } }, messages: [msg(1, null)] };
+    G.loadThreads([bad, thread("ok", [msg(1, null)], "Findable thread")]); await navigateTo({ folder: "inbox" });
+    await waitFor(() => listIds().length === 2, "both rows"); setVal(searchBox(), "findable");
+    await waitFor(() => listIds().join() === "ok", "search still works");
+  });
+
+  // Compose
+  await test("compose: needs a recipient and some content; Ctrl+Enter sends; the thread lands in Sent with a View action", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    $("[data-compose-btn]").click(); await waitFor(dialog, "dialog"); ok(dialog().getAttribute("role") === "dialog");
+    ok($("[data-compose-send]").disabled, "empty");
+    setVal($('input[aria-label="Subject"]'), "Budget check"); await sleep(40); ok($("[data-compose-send]").disabled, "subject but no recipient");
+    ok(dialog().textContent.includes("Add at least one recipient"));
+    setVal($('input[aria-label="To"]'), "dev@example.com, Sara Kim"); await waitFor(() => !$("[data-compose-send]").disabled, "enabled");
+    setVal($('textarea[aria-label="Message body"]'), "Can we confirm the numbers?");
+    key($('textarea[aria-label="Message body"]'), "Enter", { ctrlKey: true });
+    await waitFor(() => !dialog() && toast() && toast().textContent.includes("Message sent"), "sent");
+    await navigateTo({ folder: "sent" }); ok(listIds().some((id) => id.startsWith("c-")), "new conversation in Sent");
+    eq(listIds().includes("t1"), true);
+    await navigateTo({ folder: "inbox" }); ok(!listIds().some((id) => id.startsWith("c-")), "not in Inbox: nobody replied");
+    ok(localStorage.getItem("gmail-compose-draft") === null, "draft cleared after sending");
+  });
+  await test("compose: 'View' opens the sent message; it is a real thread you can reply to and star", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    $("[data-compose-btn]").click(); await waitFor(dialog, "dialog");
+    setVal($('input[aria-label="To"]'), "dev@example.com"); setVal($('input[aria-label="Subject"]'), "Hello there"); await waitFor(() => !$("[data-compose-send]").disabled, "enabled");
+    $("[data-compose-send]").click(); await waitFor(() => $("[data-toast-action]"), "toast"); $("[data-toast-action]").click();
+    await waitFor(() => $("h1") && $("h1").textContent === "Hello there", "opens the new conversation"); ok(location.hash.startsWith("#/sent/c-"));
+    eq(mids().length, 1); ok(isOpen("1"));
+    ok(mid("1").textContent.includes("dev@example.com"), "recipient shown");
+  });
+  await test("compose: draft survives closing with X, is restored, and Discard removes it; 'c' and Esc work", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    document.body.focus(); key(document.body, "c"); await waitFor(dialog, "c opens compose");
+    setVal($('input[aria-label="To"]'), "a@example.com"); setVal($('textarea[aria-label="Message body"]'), "unfinished");
+    key($('input[aria-label="To"]'), "Escape"); await waitFor(() => !dialog(), "Esc closes");
+    ok(JSON.parse(localStorage.getItem("gmail-compose-draft")).body === "unfinished");
+    $("[data-compose-btn]").click(); await waitFor(dialog, "reopened");
+    eq($('input[aria-label="To"]').value, "a@example.com"); eq($('textarea[aria-label="Message body"]').value, "unfinished");
+    $('[aria-label="Discard draft"]', dialog()).click(); await waitFor(() => !dialog(), "discarded");
+    ok(localStorage.getItem("gmail-compose-draft") === null);
+    $("[data-compose-btn]").click(); await waitFor(dialog, "fresh"); eq($('input[aria-label="To"]').value, "");
+  });
+  await test("compose: offline blocks Send and says the draft is safe", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    $("[data-compose-btn]").click(); await waitFor(dialog, "dialog");
+    setVal($('input[aria-label="To"]'), "a@example.com"); setVal($('textarea[aria-label="Message body"]'), "hi");
+    await waitFor(() => !$("[data-compose-send]").disabled, "enabled online");
+    Object.defineProperty(navigator, "onLine", { configurable: true, get: () => false });
+    window.dispatchEvent(new Event("offline"));
+    try {
+      await waitFor(() => $("[data-compose-send]").disabled, "disabled offline");
+      ok(dialog().textContent.includes("You're offline. Your draft is saved"));
+      key($('textarea[aria-label="Message body"]'), "Enter", { ctrlKey: true }); await sleep(80); ok(dialog(), "Ctrl+Enter does nothing offline");
+    } finally { delete navigator.onLine; window.dispatchEvent(new Event("online")); }
+    await waitFor(() => !$("[data-compose-send]").disabled, "recovered");
+  });
+
+  // Persistence
+  await test("persistence: a sent reply is still there when the conversation is reopened", async () => {
+    await restore(); await go("t1");
+    $("[data-reply-icon]", mid("3")).click(); const c = await waitFor(() => composer("3"), "composer"); setVal($("textarea", c), "I will persist");
+    await waitFor(() => !sendBtn(composer("3")).disabled, "enabled"); sendBtn(composer("3")).click(); await waitFor(() => mids().length === 14, "sent");
+    await navigateTo({ folder: "inbox" }); await waitFor(() => $("[data-row]"), "list");
+    await go("t1"); eq(mids().length, 14, "reply restored from storage");
+    ok($$("[data-mid]").some((m) => m.textContent.includes("I will persist")));
+  });
+  await test("persistence: a queued reply survives, and is sent when the thread is opened while online", async () => {
+    await restore(); await go("t1");
+    $('[aria-label="Simulate offline (demo)"]').click(); await waitFor(() => $("[data-offline-banner]"), "offline");
+    $("[data-reply-icon]", mid("3")).click(); const c = await waitFor(() => composer("3"), "composer"); setVal($("textarea", c), "queued then reopened");
+    await waitFor(() => $("[data-queue]") && !$("[data-queue]").disabled, "queue ready"); $("[data-queue]").click(); await waitFor(() => $("[data-pending-chip]"), "queued");
+    ok(JSON.parse(localStorage.getItem("gmail-replies:t1")).some((m) => m.pending === true), "stored as pending");
+    await navigateTo({ folder: "inbox" }); await waitFor(() => $("[data-row]"), "list"); await go("t1");
+    await waitFor(() => mids().length === 14 && !$("[data-pending-chip]"), "flushed on the next online visit");
+    ok(JSON.parse(localStorage.getItem("gmail-replies:t1")).every((m) => m.pending === false));
+  });
+  await test("persistence: corrupt stored replies are ignored when the thread opens", async () => {
+    localStorage.setItem("gmail-replies:t1", '"not an array"');
+    await restore(); await go("t1"); eq(mids().length, 13);
+    localStorage.setItem("gmail-replies:t1", JSON.stringify([null, "x", 5, { id: "local-ok", parent: "3", from: "Maya Chen", body: "kept", ts: new Date().toISOString() }]));
+    await go("t1"); eq(mids().length, 14, "only the well-formed saved reply is used");
+  });
+  await test("persistence: a fresh app instance shrugs off a corrupt or wrongly-shaped mailbox document", async () => {
+    for (const bad of ["{oops", JSON.stringify({ starred: [], archived: 5, trashed: null, composed: "x" })]) {
+      localStorage.setItem("gmail-mailbox", bad);
+      const frame = document.createElement("iframe"); frame.style.cssText = "position:fixed;left:-9999px;width:1200px;height:800px";
+      frame.src = location.href.split("#")[0].replace("e2e", "testapi") + "#/inbox"; document.body.appendChild(frame);
+      try { await waitFor(() => frame.contentDocument && frame.contentDocument.querySelectorAll("[data-row]").length === 3, "app starts with the defaults", 8000); }
+      finally { frame.remove(); }
+    }
+  });
+  await test("persistence: state survives a real page load (fresh app instance reads it back)", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    $('[data-star="t2"]').click(); await waitFor(() => $('[data-star="t2"]').getAttribute("aria-pressed") === "true", "starred");
+    $(`[data-row="t3"] [aria-label^="Archive"]`).click(); await waitFor(() => listIds().join() === "t1,t2", "archived");
+    const frame = document.createElement("iframe"); frame.style.cssText = "position:fixed;left:-9999px;width:1200px;height:800px";
+    frame.src = location.href.split("#")[0].replace("e2e", "testapi") + "#/starred"; document.body.appendChild(frame);
+    try {
+      await waitFor(() => frame.contentDocument && frame.contentDocument.querySelector("[data-row]"), "second app instance rendered", 8000);
+      eq([...frame.contentDocument.querySelectorAll("[data-row]")].map((r) => r.dataset.row), ["t2"], "star survived the load");
+      frame.contentWindow.location.hash = "#/archived";
+      await waitFor(() => [...frame.contentDocument.querySelectorAll("[data-row]")].map((r) => r.dataset.row).join() === "t3", "archive survived the load");
+    } finally { frame.remove(); }
+  });
+
+  // Unread badges and row state
+  await test("inbox: unread conversations are bold with a sidebar badge; reading one clears both", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    eq($('[data-row="t1"]').dataset.unread, "1"); eq($('[data-row="t2"]').dataset.unread, "0");
+    eq($('[data-count="inbox"]').textContent, "1");
+    $('[data-thread="t1"]').click(); await waitFor(() => $("h1"), "thread");
+    $('[aria-label="Back to Inbox"]').click(); await waitFor(() => $("[data-row]"), "list");
+    await waitFor(() => $('[data-row="t1"]').dataset.unread === "0" && !$('[data-count="inbox"]'), "read state updated");
+  });
+  await test("list: rows have named controls and no nested interactive elements", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    eq($$("[data-row] button button, [data-row] a button, [data-row] button a").length, 0);
+    const unnamed = $$("[data-row] button").filter((b) => { const c = b.cloneNode(true); $$(".ms", c).forEach((n) => n.remove()); return !(b.getAttribute("aria-label") || b.title || c.textContent.trim()); });
+    eq(unnamed.length, 0); ok($('nav[aria-label="Mail folders"]'));
+  });
+
+  // Navigation drawer
+  await test(MOBILE ? "menu: on phones the folders open as a drawer and close after choosing one" : "menu: on desktop the menu button collapses and restores the sidebar", async () => {
+    await restore(); await navigateTo({ folder: "inbox" });
+    const open = () => $("[data-sidebar]").dataset.open === "1";
+    const menu = () => $('[aria-label="Main menu"]');
+    if (MOBILE) {
+      ok(!open() && getComputedStyle($("[data-sidebar]")).display === "none", "closed by default on phones");
+      menu().click(); await waitFor(open, "drawer open"); ok(getComputedStyle($("[data-sidebar]")).position === "fixed", "drawer overlays the page");
+      $('[data-folder="sent"]').click(); await waitFor(() => !open() && location.hash === "#/sent", "closes after navigating");
+      menu().click(); await waitFor(open, "reopen"); $("[data-compose-btn]").click(); await waitFor(() => !open() && dialog(), "compose closes the drawer");
+    } else {
+      ok(open()); menu().click(); await waitFor(() => !open(), "collapsed"); menu().click(); await waitFor(open, "restored");
+    }
+  });
+
+  await test(MOBILE ? "toolbar: on phones thread-view controls live in a labelled 'More actions' menu" : "toolbar: on desktop every control is inline and there is no menu button", async () => {
+    await restore(); await go("t1");
+    const more = $('[aria-label="More actions"]'), panel = $("[data-toolbar-more]");
+    if (MOBILE) {
+      eq(getComputedStyle(panel).display, "none", "menu starts closed"); eq(more.getAttribute("aria-expanded"), "false");
+      more.click(); await waitFor(() => getComputedStyle(panel).display !== "none", "menu opens"); eq(more.getAttribute("aria-expanded"), "true");
+      ok(panel.textContent.includes("Expand all messages") && panel.textContent.includes("Simulate offline"), "items carry visible labels");
+      const toolbar = $("h1").closest("div.px-4").previousElementSibling.getBoundingClientRect(), box = panel.getBoundingClientRect();
+      ok(box.right <= innerWidth + 1 && box.left >= 0, "menu stays on screen");
+      $('[aria-label="Expand all messages"]').click(); await waitFor(() => getComputedStyle(panel).display === "none", "choosing an item closes the menu");
+    } else {
+      eq(getComputedStyle(more).display, "none"); ok(getComputedStyle(panel).display !== "none");
+      const label = $('[aria-label="Expand all messages"] span.sm\\:hidden');
+      ok(label && getComputedStyle(label).display === "none", "the text label is phone-only");
+    }
   });
 
   // accessibility

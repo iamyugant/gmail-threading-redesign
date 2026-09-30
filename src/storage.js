@@ -41,6 +41,9 @@ window.ThreadStorage = (function () {
   return {
     readJSON, writeJSON, remove, draftKey, loadDraft, draftedMessageIds,
     saveDraft: writeJSON, clearDraft: remove,
+    mailboxKey: "gmail-mailbox",
+    composeDraftKey: "gmail-compose-draft",
+    repliesKey: (threadId) => `gmail-replies:${threadId}`,
     lastSeenKey: (threadId) => `gmail-lastseen:${threadId}`,
     resolutionsKey: (threadId) => `gmail-resolved:${threadId}`,
   };

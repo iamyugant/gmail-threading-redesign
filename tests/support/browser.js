@@ -27,7 +27,8 @@ async function startBrowser({ portBase = 9300 } = {}) {
   const port = portBase + Math.floor(Math.random() * 400);
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "thread-e2e-"));
   const chrome = spawn(findChrome(), [
-    "--headless=new", "--disable-gpu", "--no-sandbox", `--remote-debugging-port=${port}`,
+    "--headless=new", "--disable-gpu", "--no-sandbox", "--no-first-run", "--disable-crash-reporter", "--disable-breakpad",
+    `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`, "--allow-file-access-from-files", "about:blank",
   ], { stdio: "ignore" });
 

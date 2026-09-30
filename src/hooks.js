@@ -209,7 +209,7 @@ window.ThreadHooks = (function () {
 
   /**
    * Thread shortcuts: j/k move, n next unread, o open/close, f fold, b focus branch, x resolve, r reply,
-   * Esc leaves focus mode. `api` is read through a ref so the listener is registered once.
+   * e archive, # delete, Esc leaves focus mode. `api` is read through a ref so the listener is registered once.
    * Ignored while typing, and with Ctrl/Cmd/Alt held so browser shortcuts keep working.
    */
   function useThreadShortcuts(api) {
@@ -223,6 +223,8 @@ window.ThreadHooks = (function () {
         const a = latest.current;
         if (!a.root) return;
         if (e.key === "Escape" && a.focusId) { a.clearFocus(); return; }
+        if (e.key === "e" && a.archive) { e.preventDefault(); a.archive(); return; }
+        if (e.key === "#" && a.trash) { e.preventDefault(); a.trash(); return; }
 
         const holder = target && target.closest ? target.closest("[data-mid]") : null;
         const current = holder ? holder.dataset.mid : a.activeId;
@@ -243,6 +245,103 @@ window.ThreadHooks = (function () {
       document.addEventListener("keydown", onKeyDown);
       return () => document.removeEventListener("keydown", onKeyDown);
     }, []);
+  }
+
+  // Routing, mailbox, toasts
+
+  /** Routes look like #/inbox, #/sent/<threadId>, #/inbox?q=launch. The hash keeps deep links and the Back button working on static hosting. */
+  function parseRoute(hash) {
+    const [path, queryString = ""] = String(hash || "").replace(/^#\/?/, "").split("?");
+    const parts = path.split("/").filter(Boolean).map((part) => { try { return decodeURIComponent(part); } catch { return part; } });
+    return {
+      folder: window.Mailbox.FOLDERS.includes(parts[0]) ? parts[0] : "inbox",
+      threadId: parts[1] != null ? parts[1] : null,
+      query: new URLSearchParams(queryString).get("q") || "",
+    };
+  }
+
+  function formatRoute({ folder, threadId = null, query = "" }) {
+    const thread = threadId != null ? `/${encodeURIComponent(threadId)}` : "";
+    return `#/${folder}${thread}${query ? `?q=${encodeURIComponent(query)}` : ""}`;
+  }
+
+  function useHashRoute() {
+    const [route, setRoute] = useState(() => parseRoute(location.hash));
+    useEffect(() => {
+      const onChange = () => setRoute(parseRoute(location.hash));
+      window.addEventListener("hashchange", onChange);
+      return () => window.removeEventListener("hashchange", onChange);
+    }, []);
+    /** `replace` swaps the current history entry (used while typing a search so Back doesn't replay keystrokes). */
+    const navigate = useCallback((next, { replace = false } = {}) => {
+      const hash = formatRoute(next);
+      setRoute(parseRoute(hash));
+      if (replace) history.replaceState(null, "", hash);
+      else location.hash = hash;
+    }, []);
+    return { route, navigate };
+  }
+
+  const EMPTY_MAILBOX = { starred: {}, archived: {}, trashed: {}, composed: [] };
+
+  /** Stars, archive/trash placement and conversations I composed, persisted as one document. */
+  function useMailboxState() {
+    const [mailbox, setMailbox] = useState(() => {
+      const saved = Store.readJSON(Store.mailboxKey, null);
+      const isMap = (v) => v && typeof v === "object" && !Array.isArray(v);
+      return saved && isMap(saved.starred) && isMap(saved.archived) && isMap(saved.trashed) && Array.isArray(saved.composed) ? saved : EMPTY_MAILBOX;
+    });
+    const latest = useRef(mailbox);
+    const apply = useCallback((change) => {
+      const next = change(latest.current);
+      latest.current = next;
+      setMailbox(next);
+      Store.writeJSON(Store.mailboxKey, next);
+    }, []);
+
+    const toggleStar = useCallback((id) => apply((m) => ({ ...m, starred: { ...m.starred, [id]: !m.starred[id] } })), [apply]);
+    /** Returns where the conversation was, so the caller can offer Undo. */
+    const moveTo = useCallback((id, place) => {
+      const before = { archived: !!latest.current.archived[id], trashed: !!latest.current.trashed[id] };
+      apply((m) => ({
+        ...m,
+        archived: { ...m.archived, [id]: place === "archived" ? true : place === "inbox" ? false : m.archived[id] },
+        trashed: { ...m.trashed, [id]: place === "trash" },
+      }));
+      return before;
+    }, [apply]);
+    const restorePlacement = useCallback((id, before) => apply((m) => ({ ...m, archived: { ...m.archived, [id]: before.archived }, trashed: { ...m.trashed, [id]: before.trashed } })), [apply]);
+    const addConversation = useCallback((thread) => apply((m) => ({ ...m, composed: [...m.composed, thread] })), [apply]);
+    const reset = useCallback(() => { latest.current = EMPTY_MAILBOX; setMailbox(EMPTY_MAILBOX); Store.remove(Store.mailboxKey); }, []);
+    return { mailbox, toggleStar, moveTo, restorePlacement, addConversation, reset };
+  }
+
+  /** One transient message with an optional action ("Undo"), dismissed after a few seconds. */
+  function useToast(durationMs = 7000) {
+    const [toast, setToast] = useState(null);
+    const timer = useRef(null);
+    const dismiss = useCallback(() => { clearTimeout(timer.current); setToast(null); }, []);
+    const show = useCallback((next) => {
+      clearTimeout(timer.current);
+      setToast({ ...next, id: Date.now() });
+      timer.current = setTimeout(() => setToast(null), durationMs);
+    }, [durationMs]);
+    useEffect(() => () => clearTimeout(timer.current), []);
+    return { toast, show, dismiss };
+  }
+
+  /** Messages for a thread: the seeded ones plus replies I sent here, which survive reloads (including queued ones). */
+  function useThreadMessages(thread) {
+    const key = Store.repliesKey(thread.id);
+    const [messages, setMessages] = useState(() => {
+      const saved = Store.readJSON(key, []);
+      return [...thread.messages, ...(Array.isArray(saved) ? saved.filter((m) => m && typeof m === "object") : [])];
+    });
+    useEffect(() => {
+      const mine = messages.filter((m) => m && String(m.id).startsWith("local-"));
+      if (mine.length || Store.readJSON(key, null) != null) Store.writeJSON(key, mine);
+    }, [messages, key]);
+    return [messages, setMessages];
   }
 
   // Composer draft
@@ -300,8 +399,9 @@ window.ThreadHooks = (function () {
 
   return {
     findMessageElement, focusMessageHeader,
-    useNarrowViewport, useOnlineStatus, useAnnouncer,
+    useMediaQuery, useNarrowViewport, useOnlineStatus, useAnnouncer,
     useReadTracking, useResolutionLedger, useDisclosure, useBranchFocus,
     useScrollTracking, useThreadShortcuts, useReplyDraft,
+    useHashRoute, useMailboxState, useToast, useThreadMessages,
   };
 })();

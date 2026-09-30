@@ -7,6 +7,7 @@
 <meta name="description" content="Gmail threading redesign prototype: branch focus, resolution ledger and audience-drift signals." />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Google+Sans+Text:wght@400;500&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300..500,0..1,0" rel="stylesheet" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 24 24%27%3E%3Cpath fill=%27%23ea4335%27 d=%27M2 4h20v16H2z%27/%3E%3Cpath fill=%27%23fff%27 d=%27M3 6l9 7 9-7v2l-9 7-9-7z%27/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="src/styles.css" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
@@ -16,6 +17,7 @@
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="src/threading.js"></script>
+<script src="src/mailbox.js"></script>
 <script src="src/storage.js"></script>
 <script src="src/hooks.js"></script>
 <script src="src/sample-data.js"></script>
@@ -27,10 +29,12 @@
 const { useState, useEffect, useMemo, useRef, useCallback, useContext } = React;
 const T = window.Threading;
 const Store = window.ThreadStorage;
+const Mailbox = window.Mailbox;
 const { CURRENT_USER: ME, threads: SAMPLE_THREADS } = window.SampleData;
 const {
   findMessageElement, focusMessageHeader,
-  useNarrowViewport, useOnlineStatus, useAnnouncer,
+  useMediaQuery, useNarrowViewport, useOnlineStatus, useAnnouncer,
+  useHashRoute, useMailboxState, useToast, useThreadMessages,
   useReadTracking, useResolutionLedger, useDisclosure, useBranchFocus,
   useScrollTracking, useThreadShortcuts, useReplyDraft,
 } = window.ThreadHooks;
@@ -339,29 +343,34 @@ function MessageHeader({ node, open, isNew, hasDraft, deep, parent, drift, items
               <Avatar name={parent.from} size={16} /><Icon name="subdirectory_arrow_right" size={12} /><span className="truncate">{first(parent.from)}</span>
             </span>
           )}
-          {node.fallback && (
-            <span data-fallback={node.fallback} title={FALLBACK_TIP[node.fallback]} className="text-[var(--sub)] cursor-help flex shrink-0"><Icon name="info" size={16} /></span>
-          )}
-          {node.pending && (
-            <span data-pending-chip className="inline-flex items-center gap-1 text-xs bg-[#fef7e0] text-[#7a4b00] rounded-full px-2 h-5 shrink-0"><Icon name="schedule" size={14} />Queued</span>
-          )}
-          {drift && drift.dropped.length > 0 && !open && (
-            <span data-delta-icon title={`Dropped from this reply: ${drift.dropped.join(", ")}`} className="shrink-0 flex"><Icon name="person_remove" size={16} color="var(--sub)" /></span>
-          )}
-          {mentionsYou && <span title="Mentions you" className="shrink-0 flex"><Icon name="alternate_email" size={16} color="var(--blue)" /></span>}
-          {!open && items.map((item) => (
-            <Icon key={item.key} name={ITEM_KIND[item.type].icon} fill size={16} color={ITEM_KIND[item.type].color} className={`shrink-0 ${item.state === "resolved" ? "opacity-40" : ""}`} />
-          ))}
-          <span className="ml-auto pl-1 text-xs text-[var(--sub)] whitespace-nowrap shrink-0">
-            <span className="sm:hidden">{node.dateShort}</span><span className="hidden sm:inline">{node.date}</span>
+          {/* Status icons share one shrinkable group, so a crowded row clips them instead of pushing the date off a narrow screen. */}
+          <span className="flex items-center gap-1.5 sm:gap-2 min-w-0 overflow-hidden">
+            {node.fallback && (
+              <span data-fallback={node.fallback} title={FALLBACK_TIP[node.fallback]} className="text-[var(--sub)] cursor-help flex shrink-0"><Icon name="info" size={16} /></span>
+            )}
+            {node.pending && (
+              <span data-pending-chip className="inline-flex items-center gap-1 text-xs bg-[#fef7e0] text-[#7a4b00] rounded-full px-2 h-5 shrink-0"><Icon name="schedule" size={14} />Queued</span>
+            )}
+            {drift && drift.dropped.length > 0 && !open && (
+              <span data-delta-icon title={`Dropped from this reply: ${drift.dropped.join(", ")}`} className="shrink-0 flex"><Icon name="person_remove" size={16} color="var(--sub)" /></span>
+            )}
+            {mentionsYou && <span title="Mentions you" className="shrink-0 flex"><Icon name="alternate_email" size={16} color="var(--blue)" /></span>}
+            {!open && items.map((item) => (
+              <Icon key={item.key} name={ITEM_KIND[item.type].icon} fill size={16} color={ITEM_KIND[item.type].color} className={`shrink-0 ${item.state === "resolved" ? "opacity-40" : ""}`} />
+            ))}
           </span>
+          <span className="hidden sm:inline ml-auto pl-1 text-xs text-[var(--sub)] whitespace-nowrap shrink-0">{node.date}</span>
         </div>
-        {!open && <div className={`text-[13px] truncate -mt-1 ${isNew ? "text-[var(--text)]" : "text-[var(--sub)]"}`}>{snippet}</div>}
-        {open && (
-          <div className="text-xs text-[var(--sub)] -mt-1 truncate">
-            to {node.to.length ? node.to.map(first).join(", ") : "nobody"}{node.cc.length > 0 && <>, cc {node.cc.map(first).join(", ")}</>}
-          </div>
-        )}
+        {/* On phones the date rides on the second line, next to a snippet that truncates, so deep rows never run out of width. */}
+        <div className="flex items-baseline gap-2 -mt-1 min-w-0">
+          {!open && <span className={`flex-1 min-w-0 text-[13px] truncate ${isNew ? "text-[var(--text)]" : "text-[var(--sub)]"}`}>{snippet}</span>}
+          {open && (
+            <span className="flex-1 min-w-0 text-xs text-[var(--sub)] truncate">
+              to {node.to.length ? node.to.map(first).join(", ") : "nobody"}{node.cc.length > 0 && <>, cc {node.cc.map(first).join(", ")}</>}
+            </span>
+          )}
+          <span className="sm:hidden shrink-0 text-xs text-[var(--sub)] whitespace-nowrap">{node.dateShort}</span>
+        </div>
       </div>
     </div>
   );
@@ -640,8 +649,8 @@ const newLocalId = () => `local-${Date.now().toString(36)}-${++localMessageCount
 const overviewSelector = '[aria-label="Thread overview"]';
 
 /** Wires the smaller hooks together and exposes everything the thread UI needs. */
-function useThreadController(thread) {
-  const [messages, setMessages] = useState(thread.messages);
+function useThreadController(thread, { onArchive, onTrash }) {
+  const [messages, setMessages] = useThreadMessages(thread);
   const tree = useMemo(() => T.buildThreadTree(messages), [messages]);
   const { root, byId } = tree;
   const multi = tree.messages.length > 1;
@@ -703,7 +712,7 @@ function useThreadController(thread) {
 
   const closeReply = useCallback((id) => {
     setReplyingTo((current) => (current === id ? null : current));
-    requestAnimationFrame(() => { const button = document.querySelector(`[data-reply-btn="${CSS.escape(String(id))}"]`); if (button) button.focus(); });
+    setTimeout(() => { const button = document.querySelector(`[data-reply-btn="${CSS.escape(String(id))}"]`); if (button) button.focus(); }, 0);
   }, []);
 
   /** Scrolls a message into view, first revealing it if a fold or focus mode is hiding it. */
@@ -740,11 +749,11 @@ function useThreadController(thread) {
     const wasInOverview = !!(active && active.closest && active.closest(overviewSelector));
     announce(ledger.toggleResolved(item));
     if (!focusedKey) return;
-    requestAnimationFrame(() => {
+    setTimeout(() => {
       const match = [...document.querySelectorAll(`[data-toggle-resolved="${CSS.escape(focusedKey)}"]`)]
         .find((el) => !!el.closest(overviewSelector) === wasInOverview);
       if (match && document.activeElement !== match) match.focus();
-    });
+    }, 0);
   }, [ledger.toggleResolved, announce]);
 
   const sendReply = (parent, { text, to, cc }, { queued = false } = {}) => {
@@ -777,6 +786,7 @@ function useThreadController(thread) {
     navigateTo: (id) => { suppressSpyUntil.current = Date.now() + 900; setActiveId(id); focusMessageHeader(id); const el = findMessageElement(id); if (el) el.scrollIntoView({ block: "nearest" }); },
     nextUnread: jumpToNextUnread, toggleOpen: toggleExpanded, toggleFold: disclosure.toggleFold,
     toggleFocus: focus.toggleFocus, resolve: resolveOnMessage, reply: openReply,
+    archive: onArchive, trash: onTrash,
   });
 
   return {
@@ -801,34 +811,56 @@ function useThreadController(thread) {
 
 // Thread screen
 
-function ToolbarButton({ icon, label, onClick, active }) {
+/** Icon button. With `inMenu` it also shows its label on phones, where these controls live in the "More actions" menu. */
+function ToolbarButton({ icon, label, onClick, active, fill, inMenu = false }) {
+  const tone = active ? "!bg-[var(--blue-soft)] !text-[var(--blue)]" : "";
+  const menuLayout = inMenu ? "!w-auto !rounded-lg px-3 gap-3 justify-start sm:!w-10 sm:!rounded-full sm:px-0 sm:gap-0 sm:justify-center" : "";
   return (
-    <button onClick={onClick} title={label} aria-label={label} aria-pressed={active}
-      className={`icon-btn ${active ? "!bg-[var(--blue-soft)] !text-[var(--blue)]" : ""}`}><Icon name={icon} /></button>
+    <button onClick={onClick} title={label} aria-label={label} aria-pressed={active} className={`icon-btn ${menuLayout} ${tone}`}>
+      <Icon name={icon} fill={fill} />
+      {inMenu && <span className="sm:hidden text-sm text-[var(--text)] whitespace-nowrap pr-1">{label.replace(/ \(.*\)$/, "")}</span>}
+    </button>
   );
 }
 
-const SHORTCUT_HINT = "Keyboard: j/k next/previous message · n next unread · b focus branch · Esc show all · o open/close · f fold · x resolve · r reply · Ctrl/⌘+Enter send";
+const SHORTCUT_HINT = "Keyboard: j/k next/previous message · n next unread · b focus branch · Esc show all · o open/close · f fold · x resolve · r reply · e archive · # delete · Ctrl/⌘+Enter send";
 
-function ThreadToolbar({ c, onBack, position, total }) {
+/** Conversation-level actions (star, archive, trash, restore) plus the thread-view controls. */
+function ThreadToolbar({ c, folder, placement, starred, actions, position, total }) {
+  // Below the sm breakpoint the thread-view controls collapse into a menu so the toolbar never outgrows a 375px screen.
+  const [moreOpen, setMoreOpen] = useState(false);
   return (
     <div className="flex items-center gap-0.5 px-2 h-12 sticky top-0 bg-white z-20 rounded-t-2xl">
-      <button className="icon-btn" onClick={onBack} aria-label="Back to Inbox" title="Back to Inbox"><Icon name="arrow_back" /></button>
+      <button className="icon-btn" onClick={actions.back} aria-label={`Back to ${Mailbox.FOLDER_LABELS[folder]}`} title={`Back to ${Mailbox.FOLDER_LABELS[folder]}`}><Icon name="arrow_back" /></button>
       <span className="w-px h-5 bg-[var(--line)] mx-2" aria-hidden="true" />
-      <span className="hidden sm:flex" aria-hidden="true"><Icon name="archive" className="mx-2 text-[var(--sub)]" /><Icon name="delete" className="mx-2 text-[var(--sub)]" /></span>
-      <ToolbarButton icon="mark_email_unread" label="Mark as unread (bring back the new-reply markers)" onClick={c.markUnread} />
-      <span className="flex-1" />
-      {c.multi && (
+      {placement.trashed ? (
+        <ToolbarButton icon="restore_from_trash" label="Restore to Inbox" onClick={actions.restore} />
+      ) : (
         <>
-          <ToolbarButton icon="unfold_more" label="Expand all messages" onClick={c.showAllMessages} />
-          <ToolbarButton icon="unfold_less" label="Show only latest on each branch" onClick={c.showBranchTips} />
-          <ToolbarButton icon="format_quote" active={!c.dedupeQuotes} onClick={() => c.setDedupeQuotes((v) => !v)}
-            label={c.dedupeQuotes ? "Quoted text hidden – click to show" : "Quoted text visible – click to hide"} />
+          {placement.archived
+            ? <ToolbarButton icon="move_to_inbox" label="Move to Inbox" onClick={actions.restore} />
+            : <ToolbarButton icon="archive" label="Archive (e)" onClick={actions.archive} />}
+          <ToolbarButton icon="delete" label="Move to Trash (#)" onClick={actions.trash} />
         </>
       )}
-      <ToolbarButton icon={c.simulateOffline ? "cloud_off" : "cloud_done"} label="Simulate offline (demo)" active={c.simulateOffline} onClick={() => c.setSimulateOffline((v) => !v)} />
+      <ToolbarButton icon="star" fill={starred} active={starred} label={starred ? "Remove star" : "Add star"} onClick={actions.toggleStar} />
+      <ToolbarButton icon="mark_email_unread" label="Mark as unread (bring back the new-reply markers)" onClick={c.markUnread} />
+      <span className="flex-1" />
+      <button className="icon-btn sm:hidden" aria-label="More actions" aria-expanded={moreOpen} aria-haspopup="true" onClick={() => setMoreOpen((v) => !v)}><Icon name="more_vert" /></button>
+      <div data-toolbar-more onClick={() => setMoreOpen(false)}
+        className={`${moreOpen ? "flex" : "hidden"} sm:flex flex-col sm:flex-row items-stretch sm:items-center absolute sm:static right-2 top-11 z-30 bg-white rounded-xl shadow-lg sm:shadow-none border border-[var(--line)] sm:border-0 p-1 sm:p-0`}>
+        {c.multi && (
+          <>
+            <ToolbarButton inMenu icon="unfold_more" label="Expand all messages" onClick={c.showAllMessages} />
+            <ToolbarButton inMenu icon="unfold_less" label="Show only latest on each branch" onClick={c.showBranchTips} />
+            <ToolbarButton inMenu icon="format_quote" active={!c.dedupeQuotes} onClick={() => c.setDedupeQuotes((v) => !v)}
+              label={c.dedupeQuotes ? "Quoted text hidden – click to show" : "Quoted text visible – click to hide"} />
+          </>
+        )}
+        <ToolbarButton inMenu icon={c.simulateOffline ? "cloud_off" : "cloud_done"} label="Simulate offline (demo)" active={c.simulateOffline} onClick={() => c.setSimulateOffline((v) => !v)} />
+      </div>
       <span className="icon-btn cursor-help hidden sm:inline-flex" title={SHORTCUT_HINT}><Icon name="keyboard" /></span>
-      <span className="text-xs text-[var(--sub)] ml-2 mr-2 hidden sm:block">{position} of {total}</span>
+      {position > 0 && <span className="text-xs text-[var(--sub)] ml-2 mr-2 hidden sm:block">{position} of {total}</span>}
     </div>
   );
 }
@@ -859,14 +891,14 @@ function StickyBanners({ c }) {
   );
 }
 
-function ThreadView({ thread, onBack, index, total }) {
-  const c = useThreadController(thread);
+function ThreadView({ thread, folder, placement, starred, actions, position, total }) {
+  const c = useThreadController(thread, { onArchive: actions.archive, onTrash: actions.trash });
   const subject = String(thread.subject || "").trim() || "(no subject)";
   return (
     <NamesContext.Provider value={c.allNames}>
       <ThreadContext.Provider value={c.context}>
         <div>
-          <ThreadToolbar c={c} onBack={onBack} position={index + 1} total={total} />
+          <ThreadToolbar c={c} folder={folder} placement={placement} starred={starred} actions={actions} position={position} total={total} />
           <div className="px-4 sm:px-6 pb-10 pt-2">
             <div className="flex items-center gap-3 mb-4 pl-1 min-w-0">
               <h1 className="text-[22px] leading-7 font-normal wrap-any min-w-0">{subject}</h1>
@@ -892,56 +924,82 @@ function ThreadView({ thread, onBack, index, total }) {
 
 // Mailbox shell
 
-function InboxRow({ thread, onOpen }) {
-  let sender = "", subject = "", snippet = "", when = "", count = 0;
-  try {
-    const messages = T.buildThreadTree(thread.messages).messages;
-    const last = messages[messages.length - 1];
-    sender = T.uniq(messages.map((m) => plainFirstName(m.from))).slice(0, 3).join(", ");
-    subject = String(thread.subject || "").trim();
-    snippet = last ? (T.firstLine(T.splitQuoted(last.body).text) || "(no message body)") : "(no messages)";
-    when = last ? T.formatDate(last._ts, Date.now(), true) : "";
-    count = messages.length;
-  } catch {
-    subject = "(unreadable conversation)";
-  }
-  return (
-    <button onClick={() => onOpen(thread.id)} data-thread={thread.id}
-      className="w-full flex items-center gap-4 px-4 h-10 border-b border-[#f1f3f4] hover:shadow-[inset_1px_0_0_#dadce0,inset_-1px_0_0_#dadce0,0_1px_2px_0_rgba(60,64,67,.3)] hover:z-10 relative text-left bg-white">
-      <Icon name="check_box_outline_blank" className="text-[#bdc1c6] hidden sm:block" size={18} />
-      <Icon name="star" className="text-[#bdc1c6] hidden sm:block" size={18} />
-      <span className="w-28 sm:w-40 shrink-0 text-sm font-medium truncate">{sender || "(unknown)"}{count > 1 && <span className="text-xs text-[var(--sub)] font-normal ml-1">{count}</span>}</span>
-      <span className="text-sm truncate min-w-0"><span className="font-medium">{subject || "(no subject)"}</span><span className="text-[var(--sub)]"> – {snippet}</span></span>
-      <span className="ml-auto text-xs font-medium whitespace-nowrap">{when}</span>
-    </button>
-  );
-}
+const HOME_ICONS = { inbox: "inbox", starred: "star", sent: "send", drafts: "draft", archived: "archive", trash: "delete" };
 
-function InboxList({ threads, onOpen }) {
+function MailRow({ thread, folder, starred, onOpen, onToggleStar, onArchive, onTrash }) {
+  let summary;
+  try {
+    summary = Mailbox.summarizeThread(thread, { me: ME, lastSeen: Store.readJSON(Store.lastSeenKey(thread.id), null) });
+  } catch {
+    summary = { who: "", subject: "(unreadable conversation)", snippet: "", when: "", count: 0, unread: 0 };
+  }
+  const unread = summary.unread > 0;
+  const canArchive = folder !== "archived" && folder !== "trash";
+  const label = summary.subject || "(no subject)";
   return (
-    <div>
-      <div className="flex items-center h-12 px-4 border-b border-[var(--line)] gap-4 text-sm">
-        <span className="flex items-center gap-2 border-b-[3px] border-[var(--blue)] h-12 text-[var(--blue)] font-medium"><Icon name="inbox" />Primary</span>
-      </div>
-      {threads.length === 0 && (
-        <div className="text-center text-[var(--sub)] py-20"><Icon name="inbox" size={40} /><p className="mt-2 text-sm">Your inbox is empty.</p></div>
-      )}
-      {threads.map((thread) => <InboxRow key={thread.id} thread={thread} onOpen={onOpen} />)}
+    <div data-row={thread.id} data-unread={unread ? "1" : "0"}
+      className={`group relative flex items-center gap-1 pl-2 pr-4 h-14 sm:h-10 border-b border-[#f1f3f4] hover:z-10 hover:shadow-[inset_1px_0_0_#dadce0,inset_-1px_0_0_#dadce0,0_1px_2px_0_rgba(60,64,67,.3)] ${unread ? "bg-white" : "bg-[#f8fafd]"}`}>
+      <button data-star={thread.id} aria-pressed={starred} aria-label={`${starred ? "Remove star from" : "Star"} ${label}`} onClick={() => onToggleStar(thread.id)}
+        className="icon-btn !w-8 !h-8" title={starred ? "Starred" : "Not starred"}>
+        <Icon name="star" fill={starred} size={18} color={starred ? "#f4b400" : "#bdc1c6"} />
+      </button>
+      <button onClick={() => onOpen(thread.id)} data-thread={thread.id} className="flex-1 min-w-0 flex flex-col justify-center sm:flex-row sm:items-center sm:gap-4 h-14 sm:h-10 text-left">
+        <span className={`w-full sm:w-40 sm:shrink-0 text-sm truncate ${unread ? "font-bold" : "font-medium"}`}>
+          {summary.who || "(unknown)"}{summary.count > 1 && <span className="text-xs text-[var(--sub)] font-normal ml-1">{summary.count}</span>}
+        </span>
+        <span className="text-sm truncate min-w-0 w-full">
+          <span className={unread ? "font-bold" : "font-medium"}>{summary.subject || "(no subject)"}</span>
+          <span className="text-[var(--sub)]"> – {summary.snippet}</span>
+        </span>
+      </button>
+      <span className="hidden sm:flex items-center opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+        {canArchive && <button className="icon-btn !w-8 !h-8" aria-label={`Archive ${label}`} title="Archive" onClick={() => onArchive(thread.id)}><Icon name="archive" size={18} /></button>}
+        {folder !== "trash" && <button className="icon-btn !w-8 !h-8" aria-label={`Move ${label} to Trash`} title="Move to Trash" onClick={() => onTrash(thread.id)}><Icon name="delete" size={18} /></button>}
+      </span>
+      <span className={`w-14 text-right text-xs whitespace-nowrap ${unread ? "font-bold" : "font-medium"}`}>{summary.when}</span>
     </div>
   );
 }
 
-function AppBar() {
+function MailList({ threads, folder, query, starred, onOpen, onToggleStar, onArchive, onTrash, onClearSearch }) {
+  return (
+    <div>
+      <div className="flex items-center h-12 px-4 border-b border-[var(--line)] gap-2 text-sm">
+        <span className="flex items-center gap-2 border-b-[3px] border-[var(--blue)] h-12 text-[var(--blue)] font-medium">
+          <Icon name={HOME_ICONS[folder]} />{Mailbox.FOLDER_LABELS[folder]}
+        </span>
+        {query && <span className="text-[var(--sub)] ml-3 truncate">Results for “{query}”</span>}
+      </div>
+      {threads.length === 0 && (
+        <div data-empty className="text-center text-[var(--sub)] py-20">
+          <Icon name={query ? "search_off" : HOME_ICONS[folder]} size={40} />
+          <p className="mt-2 text-sm">{query ? `No conversations match “${query}”.` : Mailbox.EMPTY_TEXT[folder]}</p>
+          {query && <button className="link-btn mt-2" onClick={onClearSearch}>Clear search</button>}
+        </div>
+      )}
+      {threads.map((thread) => (
+        <MailRow key={thread.id} thread={thread} folder={folder} starred={!!starred[thread.id]}
+          onOpen={onOpen} onToggleStar={onToggleStar} onArchive={onArchive} onTrash={onTrash} />
+      ))}
+    </div>
+  );
+}
+
+function AppBar({ query, onQueryChange, onToggleNav, searchRef }) {
   return (
     <header className="h-16 flex items-center gap-2 px-4">
-      <button className="icon-btn" aria-label="Main menu"><Icon name="menu" size={24} /></button>
+      <button className="icon-btn" aria-label="Main menu" onClick={onToggleNav}><Icon name="menu" size={24} /></button>
       <div className="flex items-center gap-2 sm:w-[220px]">
         <svg width="28" height="20" viewBox="0 0 28 20" aria-hidden="true"><path fill="#ea4335" d="M2 20h5V8.5L0 3.3V18a2 2 0 0 0 2 2z"/><path fill="#34a853" d="M21 20h5a2 2 0 0 0 2-2V3.3L21 8.5z"/><path fill="#fbbc04" d="M21 2v6.5l7-5.2V2.9C28 .9 25.7-.2 24.1 1z"/><path fill="#c5221f" d="M7 8.5V2l7 5.2L21 2v6.5l-7 5.2z"/><path fill="#ea4335" d="M0 2.9v.4l7 5.2V2L3.9 1C2.3-.2 0 .9 0 2.9z"/></svg>
         <span className="text-[22px] text-[var(--sub)] hidden sm:block" style={{ fontFamily: "Roboto" }}>Gmail</span>
       </div>
-      <div className="flex-1 max-w-[720px] h-12 rounded-full bg-[#eaf1fb] hover:bg-white hover:shadow-md transition flex items-center px-4 gap-3 text-[var(--sub)] min-w-0">
-        <Icon name="search" size={24} /><span className="text-base truncate">Search mail</span>
-        <Icon name="tune" className="ml-auto" />
+      <div role="search" className="flex-1 max-w-[720px] h-12 rounded-full bg-[#eaf1fb] focus-within:bg-white focus-within:shadow-md hover:bg-white hover:shadow-md transition flex items-center px-4 gap-3 text-[var(--sub)] min-w-0">
+        <Icon name="search" size={24} />
+        <input ref={searchRef} type="text" value={query} onChange={(e) => onQueryChange(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Escape") { onQueryChange(""); e.currentTarget.blur(); } }}
+          aria-label="Search mail" placeholder="Search mail  ( / )" autoComplete="off"
+          className="flex-1 min-w-0 bg-transparent outline-none text-base text-[var(--text)] placeholder:text-[var(--sub)]" />
+        {query && <button className="icon-btn !w-8 !h-8" aria-label="Clear search" onClick={() => onQueryChange("")}><Icon name="close" /></button>}
       </div>
       <span className="flex-1 hidden sm:block" />
       <div className="ml-2"><Avatar name={ME} size={32} /></div>
@@ -949,51 +1007,205 @@ function AppBar() {
   );
 }
 
-function SidebarItem({ icon, label, count, active }) {
+function Sidebar({ open, folder, counts, onCompose, onNavigate }) {
   return (
-    <div className={`flex items-center gap-4 h-8 pl-6 pr-3 rounded-r-full text-sm ${active ? "bg-[var(--blue-soft)] font-bold" : "hover:bg-[var(--hover)] text-[var(--text)]"}`}>
-      <Icon name={icon} fill={active} size={20} /><span className="flex-1">{label}</span>{count && <span className="text-xs font-medium">{count}</span>}
+    <nav aria-label="Mail folders" data-sidebar data-open={open ? "1" : "0"}
+      className={`${open ? "block" : "hidden"} fixed md:static inset-y-0 left-0 z-40 md:z-auto w-[256px] pt-20 md:pt-0 bg-[var(--bg)] md:bg-transparent shrink-0 pr-3 shadow-xl md:shadow-none`}>
+      <button data-compose-btn onClick={onCompose} className="flex items-center gap-4 h-14 pl-4 pr-6 ml-2 mb-4 rounded-2xl bg-[#c2e7ff] hover:shadow-md text-sm font-medium transition">
+        <Icon name="edit" size={24} />Compose
+      </button>
+      {Mailbox.FOLDERS.map((name) => {
+        const active = folder === name;
+        return (
+          <a key={name} href={`#/${name}`} data-folder={name} aria-current={active ? "page" : undefined} onClick={onNavigate}
+            className={`flex items-center gap-4 h-8 pl-6 pr-3 rounded-r-full text-sm ${active ? "bg-[var(--blue-soft)] font-bold" : "hover:bg-[var(--hover)] text-[var(--text)]"}`}>
+            <Icon name={HOME_ICONS[name]} fill={active} size={20} /><span className="flex-1">{Mailbox.FOLDER_LABELS[name]}</span>
+            {counts[name] > 0 && <span data-count={name} className="text-xs font-medium">{counts[name]}</span>}
+          </a>
+        );
+      })}
+    </nav>
+  );
+}
+
+function ComposeDialog({ online, onSend, onClose, onDiscard }) {
+  const saved = useMemo(() => Store.readJSON(Store.composeDraftKey, null) || {}, []);
+  const [to, setTo] = useState(typeof saved.to === "string" ? saved.to : "");
+  const [subject, setSubject] = useState(typeof saved.subject === "string" ? saved.subject : "");
+  const [body, setBody] = useState(typeof saved.body === "string" ? saved.body : "");
+  const recipients = useMemo(() => Mailbox.parseRecipients(to), [to]);
+  const hasContent = subject.trim() !== "" || body.trim() !== "";
+  const canSend = online && recipients.length > 0 && hasContent;
+
+  useEffect(() => {
+    if (to || subject || body) Store.writeJSON(Store.composeDraftKey, { to, subject, body });
+    else Store.remove(Store.composeDraftKey);
+  }, [to, subject, body]);
+
+  const send = () => { if (canSend) onSend({ to: recipients, subject, body }); };
+  const fieldClass = "w-full px-4 py-2 text-sm outline-none bg-transparent border-t border-[#f1f3f4]";
+  return (
+    <div role="dialog" aria-label="New message" data-compose-dialog
+      onKeyDown={(e) => { if (e.key === "Escape") onClose(); else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); } }}
+      className="fade-in fixed z-50 bottom-0 right-0 sm:right-6 w-full sm:w-[480px] bg-white rounded-t-2xl shadow-[0_8px_30px_rgba(60,64,67,.35)] border border-[var(--line)] flex flex-col max-h-[90vh]">
+      <div className="flex items-center h-10 pl-4 pr-1 bg-[#f2f6fc] rounded-t-2xl text-sm font-medium">
+        <span className="flex-1">New message</span>
+        <button className="icon-btn !w-8 !h-8" aria-label="Save and close" title="Save and close" onClick={onClose}><Icon name="close" size={18} /></button>
+      </div>
+      <input autoFocus aria-label="To" placeholder="To (comma-separated)" value={to} onChange={(e) => setTo(e.target.value)} className={fieldClass} />
+      <input aria-label="Subject" placeholder="Subject" value={subject} onChange={(e) => setSubject(e.target.value)} className={fieldClass} />
+      <textarea aria-label="Message body" rows={10} value={body} onChange={(e) => setBody(e.target.value)} className={`${fieldClass} resize-none flex-1`} />
+      <div className="px-3 py-3 flex items-center gap-2 flex-wrap">
+        <button className="btn btn-primary" data-compose-send disabled={!canSend} onClick={send} title={online ? "Send (Ctrl/⌘+Enter)" : "You're offline"}>Send</button>
+        <span role="status" aria-live="polite" className="text-xs text-[var(--sub)]">
+          {!online ? <span className="text-[#a05600]">You're offline. Your draft is saved on this device.</span>
+            : to.trim() === "" && hasContent ? <span className="text-[#c5221f]">Add at least one recipient</span> : "Draft saved automatically"}
+        </span>
+        <button className="icon-btn ml-auto" aria-label="Discard draft" title="Discard draft" onClick={onDiscard}><Icon name="delete" /></button>
+      </div>
     </div>
   );
 }
 
-function Sidebar() {
+function ToastHost({ toast, onDismiss }) {
   return (
-    <aside className="hidden md:block w-[256px] shrink-0 pr-3" aria-hidden="true">
-      <button tabIndex={-1} className="flex items-center gap-4 h-14 pl-4 pr-6 ml-2 mb-4 rounded-2xl bg-[#c2e7ff] hover:shadow-md text-sm font-medium transition">
-        <Icon name="edit" size={24} />Compose
-      </button>
-      <SidebarItem icon="inbox" label="Inbox" count="3" active />
-      <SidebarItem icon="star" label="Starred" /><SidebarItem icon="schedule" label="Snoozed" />
-      <SidebarItem icon="send" label="Sent" /><SidebarItem icon="draft" label="Drafts" />
-    </aside>
+    <div role="status" aria-live="polite" data-toast-host className="fixed z-50 left-4 bottom-4 pointer-events-none">
+      {toast && (
+        <div data-toast className="fade-in pointer-events-auto flex items-center gap-4 bg-[#2b2b2b] text-white text-sm rounded-md pl-4 pr-2 py-2 shadow-lg">
+          <span>{toast.message}</span>
+          {toast.actionLabel && (
+            <button data-toast-action className="font-medium text-[#8ab4f8] px-2 py-1 rounded hover:bg-white/10" onClick={() => { toast.onAction(); onDismiss(); }}>{toast.actionLabel}</button>
+          )}
+          <button className="icon-btn !w-8 !h-8 !text-white/80" aria-label="Dismiss" onClick={onDismiss}><Icon name="close" size={18} /></button>
+        </div>
+      )}
+    </div>
   );
 }
 
 function App() {
-  const [threads, setThreads] = useState(SAMPLE_THREADS);
-  const [openId, setOpenId] = useState(null);
+  const [baseThreads, setBaseThreads] = useState(SAMPLE_THREADS);
+  const { mailbox, toggleStar, moveTo, restorePlacement, addConversation, reset: resetMailbox } = useMailboxState();
+  const threads = useMemo(() => [...baseThreads, ...mailbox.composed], [baseThreads, mailbox.composed]);
+  const { route, navigate } = useHashRoute();
+  const { toast, show: showToast, dismiss: dismissToast } = useToast();
+  const isDesktop = useMediaQuery("(min-width: 768px)");
+  const [navOpen, setNavOpen] = useState(() => matchMedia("(min-width: 768px)").matches);
+  const [composing, setComposing] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [storageVersion, setStorageVersion] = useState(0);
+  const searchRef = useRef(null);
 
-  // Installed only with ?e2e or ?testapi: lets the browser suite (and screenshot script) swap in fixtures and navigate deterministically.
   useEffect(() => {
-    if (TEST_API_ENABLED) window.__testApi = { loadThreads: setThreads, openThread: setOpenId, sampleThreads: SAMPLE_THREADS };
+    const up = () => setOnline(true), down = () => setOnline(false);
+    window.addEventListener("online", up); window.addEventListener("offline", down);
+    return () => { window.removeEventListener("online", up); window.removeEventListener("offline", down); };
   }, []);
 
-  const index = threads.findIndex((t) => t.id === openId);
-  const backToInbox = () => setOpenId(null);
+  // Leaving a thread writes its read marker, so list unread state is recomputed after every navigation.
+  useEffect(() => { setStorageVersion((v) => v + 1); }, [route.threadId, route.folder]);
+
+  // Only installed with ?e2e or ?testapi: lets the browser suite (and screenshot script) swap in fixtures and navigate deterministically.
+  useEffect(() => {
+    if (!TEST_API_ENABLED) return;
+    window.__testApi = {
+      loadThreads: setBaseThreads,
+      openThread: (id) => navigate({ folder: "inbox", threadId: id }),
+      navigate,
+      sampleThreads: SAMPLE_THREADS,
+      // Returns the shell to a pristine state between tests (in-memory mailbox, dialogs, toasts).
+      resetApp: () => { resetMailbox(); setComposing(false); dismissToast(); },
+    };
+  }, [navigate, resetMailbox, dismissToast]);
+
+  const folder = route.folder;
+  const draftedThreadIds = useMemo(() => new Set(threads.filter((t) => Store.draftedMessageIds(t.id).size > 0).map((t) => t.id)),
+    [threads, storageVersion, composing]); // eslint-disable-line react-hooks/exhaustive-deps -- drafts live in storage, refreshed per navigation
+  const inFolder = (name, thread) => Mailbox.belongsToFolder(name, thread, { me: ME, flags: mailbox, hasDraft: draftedThreadIds.has(thread.id) });
+  const visible = useMemo(
+    () => Mailbox.newestFirst(threads.filter((t) => inFolder(folder, t))).filter((t) => Mailbox.matchesQuery(t, route.query)),
+    [threads, mailbox, folder, route.query, draftedThreadIds]); // eslint-disable-line react-hooks/exhaustive-deps
+  const counts = useMemo(() => {
+    const inbox = threads.filter((t) => inFolder("inbox", t)).filter((t) => {
+      try { return Mailbox.summarizeThread(t, { me: ME, lastSeen: Store.readJSON(Store.lastSeenKey(t.id), null) }).unread > 0; } catch { return false; }
+    }).length;
+    return { inbox, drafts: threads.filter((t) => inFolder("drafts", t)).length };
+  }, [threads, mailbox, draftedThreadIds, storageVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const openList = (next = {}) => navigate({ folder, query: route.query, ...next });
+  const openThread = (id) => navigate({ folder, threadId: id, query: route.query });
+  const setQuery = (query) => navigate({ folder, query }, { replace: true });
+
+  const moveConversation = (id, place, message) => {
+    const before = moveTo(id, place);
+    if (route.threadId === id) openList({ threadId: null });
+    showToast({ message, actionLabel: "Undo", onAction: () => restorePlacement(id, before) });
+  };
+  const archive = (id) => moveConversation(id, "archived", "Conversation archived");
+  const trash = (id) => moveConversation(id, "trash", "Conversation moved to Trash");
+  const restore = (id) => moveConversation(id, "inbox", "Conversation moved to Inbox");
+
+  const sendNewMessage = ({ to, subject, body }) => {
+    const id = `c-${Date.now().toString(36)}`;
+    addConversation(Mailbox.createConversation({ id, me: ME, to, subject, body }));
+    Store.remove(Store.composeDraftKey);
+    setComposing(false);
+    showToast({ message: "Message sent", actionLabel: "View", onAction: () => navigate({ folder: "sent", threadId: id }) });
+  };
+  const discardCompose = () => { Store.remove(Store.composeDraftKey); setComposing(false); };
+
+  // Global shortcuts: "/" focuses search, "c" composes (ignored while typing or with modifiers held).
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.target.closest && e.target.closest("input, textarea, select, [contenteditable='true']")) return;
+      if (e.key === "/") { e.preventDefault(); if (searchRef.current) searchRef.current.focus(); }
+      else if (e.key === "c") { e.preventDefault(); setComposing(true); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const thread = route.threadId != null ? threads.find((t) => t.id === route.threadId) : null;
+  const position = thread ? visible.findIndex((t) => t.id === thread.id) + 1 : 0;
+  const closeNavOnPhone = () => { if (!isDesktop) setNavOpen(false); };
+
+  let content;
+  if (route.threadId != null && !thread) {
+    content = (
+      <div data-not-found className="text-center text-[var(--sub)] py-20 px-6">
+        <Icon name="search_off" size={40} /><p className="mt-2 text-sm">That conversation doesn't exist (or was removed).</p>
+        <button className="btn mt-4" onClick={() => openList({ threadId: null })}>Back to {Mailbox.FOLDER_LABELS[folder]}</button>
+      </div>
+    );
+  } else if (thread) {
+    content = (
+      <ThreadView key={thread.id} thread={thread} folder={folder} position={position} total={visible.length}
+        placement={{ archived: !!mailbox.archived[thread.id], trashed: !!mailbox.trashed[thread.id] }} starred={!!mailbox.starred[thread.id]}
+        actions={{
+          back: () => openList({ threadId: null }), toggleStar: () => toggleStar(thread.id),
+          archive: () => archive(thread.id), trash: () => trash(thread.id), restore: () => restore(thread.id),
+        }} />
+    );
+  } else {
+    content = (
+      <MailList threads={visible} folder={folder} query={route.query} starred={mailbox.starred}
+        onOpen={openThread} onToggleStar={toggleStar} onArchive={archive} onTrash={trash} onClearSearch={() => setQuery("")} />
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col">
-      <AppBar />
+      <AppBar query={route.query} onQueryChange={setQuery} onToggleNav={() => setNavOpen((v) => !v)} searchRef={searchRef} />
+      {navOpen && !isDesktop && <div className="fixed inset-0 z-30 bg-black/30" onClick={() => setNavOpen(false)} aria-hidden="true" />}
       <div className="flex flex-1 pr-4 pb-4 pl-4 md:pl-0 min-w-0">
-        <Sidebar />
+        <Sidebar open={navOpen} folder={folder} counts={counts} onCompose={() => { setComposing(true); closeNavOnPhone(); }} onNavigate={closeNavOnPhone} />
         <main className="flex-1 min-w-0 bg-white rounded-2xl overflow-hidden">
-          <ErrorBoundary key={openId || "inbox"} onBack={backToInbox}>
-            {index >= 0
-              ? <ThreadView key={openId} thread={threads[index]} index={index} total={threads.length} onBack={backToInbox} />
-              : <InboxList threads={threads} onOpen={setOpenId} />}
-          </ErrorBoundary>
+          <ErrorBoundary key={`${route.folder}/${route.threadId}`} onBack={() => openList({ threadId: null })}>{content}</ErrorBoundary>
         </main>
       </div>
+      {composing && <ComposeDialog online={online} onSend={sendNewMessage} onClose={() => setComposing(false)} onDiscard={discardCompose} />}
+      <ToastHost toast={toast} onDismiss={dismissToast} />
     </div>
   );
 }

@@ -15,7 +15,11 @@ const VIEWPORTS = [
   { name: "mobile", width: 375, height: 812, mobile: true },
 ];
 
-// Each state is a snippet run after the "Q4 Launch" thread is open.
+// Each state is a snippet run after the "Q4 Launch" thread is open (or, for list states, after going back to the list).
+const LIST_STATES = {
+  "mail-list": "",
+  "compose": `document.querySelector('[data-compose-btn]').click()`,
+};
 const STATES = {
   "thread-overview": "",
   "focus-branch": `document.querySelector('[data-branch-chip="8"]').click()`,
@@ -36,6 +40,17 @@ const STATES = {
       if (action) { await browser.evaluate(action); await sleep(400); }
       await browser.evaluate("window.scrollTo(0, 0)");
       await sleep(200);
+      const shot = await browser.send("Page.captureScreenshot", { format: "png" });
+      fs.writeFileSync(path.join(outDir, `${state}.${viewport.name}.png`), Buffer.from(shot.result.data, "base64"));
+      console.log(`saved ${state}.${viewport.name}.png`);
+    }
+    for (const [state, action] of Object.entries(LIST_STATES)) {
+      await browser.setViewport(viewport);
+      await browser.navigate(pageUrl);
+      for (let i = 0; i < 60 && !(await browser.evaluate("!!window.__testApi && !!document.querySelector('[data-thread]')")); i++) await sleep(200);
+      await browser.evaluate("localStorage.clear(); window.__testApi.resetApp(); window.__testApi.navigate({ folder: 'inbox' })");
+      await sleep(400);
+      if (action) { await browser.evaluate(action); await sleep(400); }
       const shot = await browser.send("Page.captureScreenshot", { format: "png" });
       fs.writeFileSync(path.join(outDir, `${state}.${viewport.name}.png`), Buffer.from(shot.result.data, "base64"));
       console.log(`saved ${state}.${viewport.name}.png`);
