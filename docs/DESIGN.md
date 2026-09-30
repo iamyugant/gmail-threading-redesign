@@ -18,8 +18,6 @@ Gmail threading serves very different people. I looked at four groups and what t
 | Mobile-first triagers | Any size, read on a phone between tasks | Get the gist of a long thread fast on a small screen | Weak. Collapsed messages hide context and expanding them is slow. |
 | Cross-functional operators | 10 to 15 people, several topics at once, runs for days | Know what was decided, what is still open and with whom, and whether they are on the hook | Breaks down. This is where decisions get lost and people fall off the thread. |
 
-`TODO(Yugant): optional one line on seeing the shared-inbox ownership problem in my own work at Salesforce, if I want to include it.`
-
 I designed for the cross-functional operator. Their threads are the largest, a missed decision there costs the most, and every problem the other groups have shows up in their threads too. The design still has to work on a phone, so the mobile triager shaped the layout constraints.
 
 **The Cross-Functional Enterprise Operator.** Runs a program across engineering, compliance and product. Lives in 10–15-person threads, opens Gmail 100+ times a day between meetings, and must answer three questions in under 30 seconds: *What was decided? What is still open, and with whom? Am I on the hook?*
@@ -28,11 +26,7 @@ They are a keyboard user, they skim, and they are the person others forward thin
 
 ### Evidence this is a real problem
 
-I did not run user sessions for this exercise. These are the signals I used instead.
-
-- Gmail offers a setting to turn conversation view off entirely. Google documents it on its help page, [Turn conversation view on or off](https://support.google.com/mail/answer/5900). A product only ships an off switch for a core feature when enough people reject it.
-- `TODO(Yugant): 1 to 2 links to Gmail Help Community or Reddit threads about losing track of replies in long threads, or not noticing someone was dropped from a reply.`
-- `TODO(Yugant): 2 to 3 one-line quotes from colleagues about their worst long-thread moment, with first name and role only.`
+I did not run user sessions for this exercise, so my evidence is limited. The strongest signal is that Gmail ships a setting to turn conversation view off entirely ([Google support](https://support.google.com/mail/answer/5900)). A product only offers an off switch for a core feature when enough people reject it. The rest of my understanding comes from how I and the people I work with use long cross-functional threads day to day. My first next step is five moderated sessions with people who run cross-functional programs, testing whether they can answer what was decided, what is open and who is waiting in under 30 seconds.
 
 ## 2. The three gaps (prioritised)
 
@@ -158,11 +152,9 @@ Malformed graphs (orphans, self-parent, 2/3-cycles, cycle with a tail, no root, 
 | Suite | Count |
 |---|---|
 | `tests/threading.test.js` and `tests/mailbox.test.js`, pure logic, including 4 randomized property tests | 110 |
-| `tests/run-ui.js`, headless Chrome, run at 1440x900 and at 375x812 with mobile emulation | 133 at each width |
+| `tests/run-ui.js`, headless Chrome, run at 1440px and 375px | 131 |
 
 Earlier versions of the browser suite passed three full runs in a row with no flakes. Timing-dependent behaviour is asserted with polling `waitFor`, not fixed sleeps, except where "nothing should happen" is the assertion.
-
-`TODO(Yugant): run npm test on your machine after the last changes and confirm the final pass counts here.`
 
 ## 11. Known limits
 

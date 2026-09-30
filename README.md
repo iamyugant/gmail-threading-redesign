@@ -5,7 +5,6 @@ A working prototype that shows what was decided, what is still open, and who dro
 | | |
 |---|---|
 | **Live demo** | https://gmail-threading-redesign-mu.vercel.app |
-| **Walkthrough video** | `TODO(Yugant): Loom link` |
 | **Design rationale** | [docs/DESIGN.md](docs/DESIGN.md) |
 
 This is a design exercise prototype and is not affiliated with Google.
@@ -59,7 +58,7 @@ The full reasoning, the research and the iteration history are in [docs/DESIGN.m
 - Storage that is missing, full or corrupt never crashes the app.
 - Nothing scrolls sideways at 375px, even with every feature on.
 - Logic tests use Node's built-in runner. Browser tests drive headless Chrome through the DevTools Protocol. There are no dependencies.
-- `npm test` runs 110 logic tests and 133 browser tests at 1440px and 375px.
+- `npm test` runs 110 logic tests and 131 browser tests. The browser tests run at 1440px and 375px.
 
 ## Run it locally
 
