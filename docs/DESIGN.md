@@ -144,6 +144,15 @@ A `//` comment that swallowed the rest of a line and blanked the app · indentat
 
 Malformed graphs (orphans, self-parent, 2/3-cycles, cycle with a tail, no root, many roots, duplicate ids, junk entries, string/number id mix, clock skew, invalid timestamps, 5 000-deep, 10 000-wide, 300 random graphs incl. `References` chains) · quotes (Gmail/Outlook/CRLF/nested/inline/only-quote/wrapped attribution) · mentions vs emails · recipients (own message, empty To, dupes, case) · storage (unavailable, full, corrupt) · XSS-shaped text · 600-char unbroken strings · 2 000-word essay · 1-char messages · 0 / 25 tracked items · 40 same-initial participants · 375 px and 1 440 px.
 
+### How the main edge cases are handled
+
+- **Drafts.** The composer saves every 1.5 seconds while you type and again when it closes. Collapsing a message mid-sentence doesn't lose words. Drafts also survive closing the composer and reloading the page.
+- **State updates.** Sent replies, resolution toggles and queued sends show up immediately. There is no server, so this is local state written straight to `localStorage`.
+- **Scale.** Trees are built without recursion. A chain 5,000 replies deep and a thread 10,000 replies wide both build without errors. 300 messages rendered in under 100 ms in my runs.
+- **Hostile text.** Message text always renders as text and never as markup. A 600-character unbroken string wraps instead of widening the page.
+- **Narrow screens.** One indent level costs about 24px. A phone column is close to 340px wide, which is why indentation stops at 2 levels there.
+- **Test setup.** There is no test framework. Logic tests use Node's built-in runner. Browser tests drive headless Chrome over the Chrome DevTools Protocol using Node's built-in `WebSocket`.
+
 ## 10. Test report
 
 | Suite | Count |

@@ -1,108 +1,72 @@
-# Gmail Threading Redesign — Enterprise Collaboration & Lineage
+# Gmail Threading Redesign
 
-> An interactive, resilient threading prototype resolving conversational branching, audience drift, and decision amnesia in high-density enterprise communication.
+A working prototype that shows what was decided, what is still open, and who dropped off in long Gmail threads.
 
-|  |  |
+| | |
 |---|---|
 | **Live demo** | https://gmail-threading-redesign-mu.vercel.app |
-| **Walkthrough video (5 min)** | _Placeholder — add the Loom link here_ ([script](docs/LOOM_SCRIPT.md)) |
+| **Walkthrough video** | `TODO(Yugant): Loom link` |
 | **Design rationale** | [docs/DESIGN.md](docs/DESIGN.md) |
+
+This is a design exercise prototype and is not affiliated with Google.
 
 ![Thread overview with the resolution ledger, branch chips and audience signals](docs/screenshots/thread-overview.desktop.png)
 
----
+## The problem
 
-## Executive summary
+Gmail shows a conversation as a flat list. In threads with 10 or more people, that causes three problems.
 
-### The problem
+- **Status amnesia.** A blocker raised in reply 2 is settled in reply 7. Nothing links them, so reply 11 asks again.
+- **Audience drift.** Someone replies to a subset. People fall off To and Cc, and the person a question was aimed at never sees it.
+- **Branching disorientation.** Several topics run at once and are mixed together in one list.
 
-Gmail renders a conversation as a chronological stack. That works for two people; it breaks down in the ten-to-fifteen-person threads that run enterprise programs:
+## What I built
 
-- **Parallel conversations are flattened.** Engineering's blocker, marketing's legal question and finance's late note are interleaved in one list, so readers reconstruct who is answering whom by hand.
-- **Decisions get buried.** Past a handful of replies the middle of the thread collapses behind a "···" accordion. A blocker raised in reply 2 and settled in reply 7 is re-asked in reply 11.
-- **Audience changes are invisible.** When a reply goes to a subset, people silently fall off `To`/`Cc`. The person a question was aimed at never sees it, and a private back-channel forms.
-
-### The thesis
-
-Treat a thread as what it really is: a **tree with state and a changing audience**. The prototype turns the message list into a context-aware workspace grounded in the same ideas that make data trustworthy — *lineage* (who replied to what), *provenance* (who closed which decision, and where) and *explicit accountability* (who is still owed an answer).
-
----
-
-## Key innovations & interaction architecture
-
-### Causal focus branch — `b`
-Isolate one conversation from root to tip. The path to the root and everything below the chosen message stay sharp; sibling branches dim (150 ms transition) and collapse into a `+N unselected replies` chip. `Esc` restores the full thread, and jumping to a hidden message leaves focus mode automatically so you never stare at nothing.
+**Focus branch.** Press `b` or click a branch chip to keep one conversation sharp from the first message to the latest reply. Other branches dim and collapse into a "+N unselected replies" chip. `Esc` brings everything back.
 
 ![Focus mode dims sibling branches](docs/screenshots/focus-branch.desktop.png)
 
-### Interactive resolution ledger
-The overview card is a live ledger of decisions, questions and blockers. Status is derived from the thread itself:
+**Resolution ledger.** The overview lists decisions, questions and blockers. A question counts as resolved when someone it was aimed at replies below it. A blocker is resolved by the latest decision below it. Each chip names who closed it and jumps to that reply. You can always mark an item resolved or reopen it yourself. Open items come first and the rest are one click away.
 
-- a **question** is resolved when someone it was aimed at (`@mentions`, otherwise `To`) replies below it;
-- a **blocker** is resolved by the latest decision recorded below it.
-
-Chips read `Awaiting Sara` → `Resolved · Sara`; clicking one jumps to the reply that closed the loop. A manual **Mark resolved / Reopen** always wins and is labelled as such. The ledger leads with open items; resolved items and decisions (the audit trail) are one click away, and a row you just toggled stays visible so it can be undone.
-
-### Audience drift & provenance badges
-Every reply is diffed against its parent's audience. A badge shows who was **dropped** and who was **added**, turning amber when a dropped person is still owed an answer. Avatars in the overview grey out for people absent from every branch's latest reply, and gain a yellow dot when a question is waiting on them. When you reply, the composer warns if someone is waiting on an answer elsewhere and offers a one-click **Add to Cc**.
+**Audience drift.** Every reply is compared with its parent's recipients. A badge shows who was dropped or added, in amber when a dropped person still owes an answer. The composer warns you when someone who owes an answer elsewhere in the thread is not on your reply.
 
 ![Audience drift badges on replies](docs/screenshots/audience-drift.desktop.png)
 
-### Keyboard-first velocity
+It also works as a small mailbox. It has folders, search, stars, archive and trash with undo, a compose window with draft autosave, and replies that survive a reload.
 
 | Key | Action | Key | Action |
 |---|---|---|---|
-| `j` / `k` | Next / previous message | `b` | Focus this branch (`Esc` to leave) |
-| `o` | Open / close message | `f` | Fold / unfold replies |
-| `r` | Reply inline | `x` | Resolve / reopen the message's item |
-| `n` | Next unread, across branches | `Ctrl`/`⌘` + `Enter` | Send |
+| `j` / `k` | Next or previous message | `b` | Focus this branch, `Esc` to leave |
+| `o` | Open or close a message | `f` | Fold or unfold replies |
+| `r` | Reply inline | `x` | Resolve or reopen the message's item |
+| `n` | Next unread, across branches | `Ctrl` or `⌘` + `Enter` | Send |
 
-Also: a **catch-up banner** ("5 new replies since Sep 28 · 3 branches · 2 decisions"), a **minimap** whose ticks indent with reply depth and show which messages are on screen, and polite `aria-live` announcements for every state change.
-
----
-
-## Design rationale & trade-offs
+## Key decisions
 
 | Decision | Chosen | Over | Why |
 |---|---|---|---|
-| Layout | Vertical tree, indent capped at **3 levels on desktop, 2 on phones**, then a thin accent line plus a parent pill | Canvas graphs, multi-column split drawers | Keeps the reading direction email users already have and survives a 375px screen; graphs and columns don't. Tested with 120-deep chains. |
-| Resolution | Deterministic, user-owned status derived from the thread, always overridable | Probabilistic, auto-generated summaries | A confident wrong summary is worse than none, and a reviewer needs to audit a decision. Every status names who closed it and links to the reply. |
-| State updates | Optimistic UI: a sent reply, a resolution toggle or a queued send appears immediately | Waiting on a round trip | The prototype has no server, so the model is honest about it: drafts autosave every 1.5s, survive collapsing a message, closing the composer and reloading, and flush on unmount. |
-| Offline | `Send` and `Ctrl+Enter` are blocked, with an explicit **Queue for later** that sends on reconnect | Silent auto-queue | Silently queueing text the user believes was sent is the worse failure. |
-| "Dropped off" | Absent from the latest reply of *every* branch | Absent from the newest message | The naive rule flags nearly everyone in any forked thread, which teaches people to ignore the signal. |
+| Layout | Vertical tree, indent capped at 3 levels, 2 on phones | Graphs and side-by-side columns | They break on a 375px screen and lose reading order. |
+| Resolution | Status derived from the thread and always overridable | Automatic summaries | A confident wrong summary is worse than none, and you can't audit it. |
+| Dropped off | Absent from the latest reply of every branch | Absent from the newest message | The simple rule flags almost everyone in a forked thread. |
+| Offline | Send is blocked, with an explicit Queue for later | Queueing silently | Silently queueing text you think was sent is the worse failure. |
 
-Full write-up, research links and the iteration history: [docs/DESIGN.md](docs/DESIGN.md).
+The full reasoning, the research and the iteration history are in [docs/DESIGN.md](docs/DESIGN.md).
 
----
+## Edge cases and tests
 
-## Edge-case engineering & resilient graph handling
+- Reply loops, missing parents, duplicate ids and bad timestamps always produce one valid tree.
+- Quoted history from Gmail and Outlook is split out. Inline replies stay intact.
+- Storage that is missing, full or corrupt never crashes the app.
+- Nothing scrolls sideways at 375px, even with every feature on.
+- Logic tests use Node's built-in runner. Browser tests drive headless Chrome through the DevTools Protocol. There are no dependencies.
+- `npm test` runs 110 logic tests and 133 browser tests at 1440px and 375px.
 
-Real mail threads are messy. `buildThreadTree` in [`src/threading.js`](src/threading.js) guarantees that **every valid message appears exactly once, there are no cycles, and there is one root**, whatever it is given:
+## Run it locally
 
-- **Cyclic replies** (A→B→A): the earliest message in each loop is re-parented to the root.
-- **Orphaned parents / self-replies:** placed under the nearest surviving ancestor in the `References` chain (the JWZ threading idea), otherwise at the root, with an explanatory tooltip.
-- **Duplicate ids, junk entries, mixed number/string ids:** first wins, the rest are skipped and reported.
-- **Missing or out-of-order timestamps:** a message without a valid time inherits the previous one's, so it doesn't sort above its own parent.
-- **Legacy clients with no threading headers:** appended chronologically and flagged.
-- **Scale:** 5,000-deep and 10,000-wide trees are built without recursion; 300 messages render in under 100 ms.
-- **Quoted history:** Gmail, Outlook and CRLF styles are split out; interleaved inline replies are left alone.
-- **Hostile text:** rendered as text, never as markup; 600-character unbroken strings wrap instead of widening the page.
-- **Storage unavailable, full or corrupt:** every read and write is guarded; the UI degrades instead of crashing.
-
-### Zero-dependency test architecture
-There is no test framework and no `node_modules`. Logic is tested with Node's built-in runner, including randomized property tests over malformed graphs. The browser suite is driven by a small script that launches headless Chrome and speaks the **Chrome DevTools Protocol** over Node's built-in `WebSocket`, running the same tests at **1440×900** and **375×812 (mobile emulation)**.
-
-### Responsive safeguards
-Nothing may cause horizontal scroll down to 375px: rows wrap instead of truncating the text that matters, the depth clamp tightens below the `sm` breakpoint (each indent costs about 24px of a ~340px column), and a test asserts that every feature active at once still fits the viewport.
-
----
-
-## Local setup & automated tests
-
-**Prerequisites:** Node.js **22 or newer** (the test driver uses the global `WebSocket`) and Google Chrome or Chromium. Nothing to install.
+You need Node.js 22 or newer and Google Chrome or Chromium. There is nothing to install.
 
 ```bash
-# Optional: serve on http://localhost:5173  (index.html also opens straight from disk)
+# Optional: serve on http://localhost:5173. index.html also opens straight from disk.
 npm start
 ```
 
@@ -110,39 +74,37 @@ The page loads React, Tailwind and fonts from public CDNs, so it needs a network
 
 ```bash
 # Run logic unit tests
-node --test tests/threading.test.js
+node --test "tests/*.test.js"
 
 # Run headless browser suite via Chrome DevTools Protocol
 node tests/run-ui.js
 ```
 
-`npm test` runs both. Handy options for the browser suite: `UI_ONLY="focus" node tests/run-ui.js` runs matching tests, `UI_VIEWPORT=mobile` limits the width, and `CHROME=/path/to/chrome` picks a browser binary.
-
-Current results: **94 logic tests** and **109 browser tests × 2 viewports**, all passing.
-
----
+`npm test` runs both. Set `UI_ONLY="focus"` to run matching browser tests, `UI_VIEWPORT=mobile` to limit the width, or `CHROME=/path/to/chrome` to pick a browser.
 
 ## Project structure
 
 ```
 .
-├── index.html               App shell and React components (JSX is compiled in the browser by Babel)
+├── index.html               App shell and React components, compiled in the browser by Babel
 ├── src/
-│   ├── threading.js         Pure logic: tree building, ledger, unread, audience drift, lineage (no DOM)
-│   ├── hooks.js             React hooks: read tracking, focus, disclosure, shortcuts, draft autosave, scroll tracking
-│   ├── storage.js           Guarded localStorage helpers for drafts, read markers and resolutions
-│   ├── sample-data.js       Demo conversations (dates are relative to today)
+│   ├── threading.js         Pure logic: tree building, ledger, unread, audience drift, lineage
+│   ├── mailbox.js           Pure logic: folders, search, inbox rows, new conversations
+│   ├── hooks.js             React hooks: routing, focus, shortcuts, draft autosave, scroll tracking
+│   ├── storage.js           Guarded localStorage helpers for drafts, read markers and replies
+│   ├── sample-data.js       Demo conversations, with dates relative to today
 │   └── styles.css           Design tokens, buttons and motion
 ├── tests/
-│   ├── threading.test.js    Logic tests for src/threading.js (Node built-in runner)
+│   ├── threading.test.js    Logic tests for src/threading.js
+│   ├── mailbox.test.js      Logic tests for src/mailbox.js
 │   ├── ui-tests.js          Browser suite, loaded by index.html when opened with ?e2e
 │   ├── run-ui.js            Runs that suite in headless Chrome at desktop and phone widths
 │   ├── screenshots.js       Captures docs/screenshots at both widths
-│   └── support/browser.js   Dependency-free Chrome DevTools Protocol driver
-├── scripts/serve.js         Zero-dependency static server for `npm start`
+│   └── support/browser.js   Small Chrome DevTools Protocol driver
+├── scripts/serve.js         Static server for `npm start`
 ├── docs/
-│   ├── DESIGN.md            Persona, prioritised gaps, research, trade-offs, iteration history
-│   ├── LOOM_SCRIPT.md       Talking points for the 5-minute walkthrough
+│   ├── DESIGN.md            Users, priorities, research, trade-offs, iteration history
+│   ├── LOOM_SCRIPT.md       Talking points for the walkthrough video
 │   └── screenshots/         Images used in this README
-└── package.json             Scripts only; no dependencies
+└── package.json             Scripts only, no dependencies
 ```
