@@ -103,7 +103,6 @@ node tests/run-ui.js
 ├── scripts/serve.js         Static server for `npm start`
 ├── docs/
 │   ├── DESIGN.md            Users, priorities, research, trade-offs, iteration history
-│   ├── LOOM_SCRIPT.md       Talking points for the walkthrough video
 │   └── screenshots/         Images used in this README
 └── package.json             Scripts only, no dependencies
 ```
