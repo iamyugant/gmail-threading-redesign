@@ -4,7 +4,7 @@
 
 |  |  |
 |---|---|
-| **Live demo** | _Placeholder — add the GitHub Pages / Vercel URL here once deployed_ |
+| **Live demo** | https://gmail-threading-redesign-mu.vercel.app |
 | **Walkthrough video (5 min)** | _Placeholder — add the Loom link here_ ([script](docs/LOOM_SCRIPT.md)) |
 | **Design rationale** | [docs/DESIGN.md](docs/DESIGN.md) |
 
