@@ -1,0 +1,99 @@
+/* Design tokens follow Gmail's current Material 3 surfaces. */
+:root {
+  --bg: #f6f8fc;
+  --surface: #f0f4f9;
+  --hover: #e9eef6;
+  --line: #dadce0;
+  --text: #1f1f1f;
+  --sub: #5f6368;
+  --blue: #0b57d0;
+  --blue-soft: #d3e3fd;
+}
+
+html, body { overflow-x: hidden; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Google Sans Text", Roboto, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Material Symbols ligature font */
+.ms {
+  font-family: "Material Symbols Outlined";
+  font-weight: 400;
+  font-style: normal;
+  font-size: 20px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  direction: ltr;
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  user-select: none;
+}
+.ms.fill { font-variation-settings: "FILL" 1, "wght" 400, "GRAD" 0, "opsz" 24; }
+
+/* Buttons */
+.icon-btn {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  color: var(--sub);
+  transition: background 0.15s;
+}
+.icon-btn:hover { background: rgba(60, 64, 67, 0.08); }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 16px;
+  border: 1px solid #747775;
+  border-radius: 9999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  transition: background 0.15s;
+}
+.btn:hover { background: var(--hover); }
+.btn-primary { background: var(--blue); border-color: transparent; color: #fff; }
+.btn-primary:hover { background: #0a4cb8; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3); }
+.btn-primary:disabled { background: #e3e3e3; color: #757575; box-shadow: none; cursor: not-allowed; }
+
+.link-btn { padding: 2px 4px; border-radius: 4px; color: var(--blue); font-size: 12px; font-weight: 500; }
+.link-btn:hover { background: var(--blue-soft); }
+
+.icon-btn:focus-visible,
+.btn:focus-visible,
+.link-btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* Leaves room for the sticky toolbar and banners when a message is scrolled into view. */
+.msg-card { scroll-margin-top: 100px; }
+
+/* Long unbroken strings (URLs, 600-character names) wrap instead of widening the page. */
+.wrap-any { overflow-wrap: anywhere; }
+
+/* Motion */
+.flash { animation: flash 1.4s ease-out; }
+@keyframes flash {
+  0% { background: var(--blue-soft); }
+  100% { background: transparent; }
+}
+.fade-in { animation: fade 0.18s ease-out; }
+@keyframes fade {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fade-in, .flash { animation: none; }
+  html { scroll-behavior: auto; }
+}

@@ -1,0 +1,1010 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gmail – Threaded Conversations</title>
+<meta name="description" content="Gmail threading redesign prototype: branch focus, resolution ledger and audience-drift signals." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Google+Sans+Text:wght@400;500&family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,300..500,0..1,0" rel="stylesheet" />
+<link rel="stylesheet" href="src/styles.css" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = { theme: { extend: { fontFamily: { sans: ['"Google Sans Text"', "Roboto", "Arial", "sans-serif"] } } } };
+</script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="src/threading.js"></script>
+<script src="src/storage.js"></script>
+<script src="src/hooks.js"></script>
+<script src="src/sample-data.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useRef, useCallback, useContext } = React;
+const T = window.Threading;
+const Store = window.ThreadStorage;
+const { CURRENT_USER: ME, threads: SAMPLE_THREADS } = window.SampleData;
+const {
+  findMessageElement, focusMessageHeader,
+  useNarrowViewport, useOnlineStatus, useAnnouncer,
+  useReadTracking, useResolutionLedger, useDisclosure, useBranchFocus,
+  useScrollTracking, useThreadShortcuts, useReplyDraft,
+} = window.ThreadHooks;
+
+const TEST_API_ENABLED = ["e2e", "testapi"].some((flag) => new URLSearchParams(location.search).has(flag));
+
+// Presentation constants
+
+const ITEM_KIND = {
+  decision: { icon: "check_circle", color: "#188038", label: "Decision" },
+  question: { icon: "help", color: "#b06000", label: "Question" },
+  blocker: { icon: "error", color: "#c5221f", label: "Blocker" },
+};
+
+const FALLBACK_TIP = {
+  "missing-metadata": "Appended chronologically (missing thread metadata).",
+  orphan: "Appended chronologically (the message it replies to isn't in this conversation).",
+  cycle: "Appended chronologically (conflicting reply headers).",
+  "partial-references": "Placed under the closest earlier message in its reply chain (the message it replies to isn't here).",
+};
+
+const AVATAR_COLORS = ["#1a73e8", "#188038", "#e37400", "#c5221f", "#9334e6", "#129eaf", "#a142f4"];
+const avatarColor = (name) => AVATAR_COLORS[[...String(name)].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % AVATAR_COLORS.length];
+
+const NAME_FOR_SELF = { subject: "me", object: "you" };
+const shownSender = (name) => (T.first(name, ME) === "me" ? NAME_FOR_SELF.subject : name);
+const plainFirstName = (name) => T.first(name, ME);
+
+/** Display names are per thread: first names, upgraded to full names wherever two people would look alike. */
+const NamesContext = React.createContext([]);
+const makeNamer = (everyone) => ({
+  who: (name) => (name === ME ? NAME_FOR_SELF.object : T.shortName(name, everyone)),
+  first: (name) => (name === ME ? NAME_FOR_SELF.subject : T.shortName(name, everyone)),
+});
+const useNames = () => {
+  const everyone = useContext(NamesContext);
+  return useMemo(() => makeNamer(everyone), [everyone]);
+};
+const branchLabel = (node, firstName) => `${firstName(node.from)}: ${T.firstLine(T.splitQuoted(node.body).text, 36) || "(no text)"}`;
+
+// Primitives
+
+const Icon = ({ name, fill, className = "", size, color }) => (
+  <span className={`ms ${fill ? "fill" : ""} ${className}`} style={{ ...(size && { fontSize: size }), ...(color && { color }) }} aria-hidden="true">{name}</span>
+);
+
+function Avatar({ name, size = 32 }) {
+  return (
+    <div title={name} style={{ width: size, height: size, background: avatarColor(name), fontSize: size * 0.42 }}
+      className="rounded-full text-white font-medium flex items-center justify-center shrink-0 select-none">{T.initial(name)}</div>
+  );
+}
+
+/** Keeps one malformed conversation from taking the whole mailbox down with it. */
+class ErrorBoundary extends React.Component {
+  state = { error: null };
+  static getDerivedStateFromError(error) { return { error }; }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div role="alert" className="p-10 text-center">
+        <Icon name="error" size={40} color="#c5221f" />
+        <h2 className="text-lg mt-2">Something went wrong showing this conversation</h2>
+        <p className="text-sm text-[var(--sub)] mt-1">The rest of your mail is fine.</p>
+        <button className="btn mt-4" onClick={this.props.onBack}>Back to Inbox</button>
+      </div>
+    );
+  }
+}
+
+// Composer
+
+function RecipientChip({ name, onRemove }) {
+  return (
+    <span className="inline-flex items-center h-6 max-w-full rounded-full border border-[var(--line)] pl-0.5 pr-1 gap-1.5 text-[13px]">
+      <Avatar name={name} size={20} /><span className="truncate">{name}</span>
+      <button aria-label={`Remove ${name}`} className="text-[var(--sub)] hover:text-black flex" onClick={onRemove}><Icon name="close" size={14} /></button>
+    </span>
+  );
+}
+
+function RecipientRow({ label, children }) {
+  return (
+    <div className="px-4 py-1.5 border-t border-[#f1f3f4] flex items-center flex-wrap gap-1.5 text-[13px]">
+      <span className="w-7 text-[var(--sub)]">{label}</span>{children}
+    </div>
+  );
+}
+
+/** Warns when someone who still owes an answer elsewhere in the thread isn't on this reply. */
+function WaitingNudge({ people, onAddToCc }) {
+  const { who } = useNames();
+  const many = people.length !== 1;
+  return (
+    <div role="note" data-waiting-nudge className="px-4 py-1.5 border-t border-[#f1f3f4] bg-[#fef7e0] text-xs text-[#7a4b00] flex items-center gap-x-2 gap-y-1 flex-wrap">
+      <Icon name="hourglass_top" size={14} />
+      <span>{T.listNames(people.map(who))} {many ? "are" : "is"} waiting on an answer elsewhere in this thread and {many ? "aren't" : "isn't"} on this reply.</span>
+      <button className="link-btn" data-add-waiting onClick={onAddToCc}>Add to Cc</button>
+    </div>
+  );
+}
+
+function DraftStatus({ online, recipientCount, status }) {
+  return (
+    <span role="status" aria-live="polite" className="text-xs">
+      {!online && (
+        <span className="inline-flex items-center gap-1 text-[#a05600] bg-[#fef7e0] rounded-full px-2.5 py-1 mr-2">
+          <Icon name="cloud_off" size={14} />Saved locally (Offline)
+        </span>
+      )}
+      {recipientCount === 0 ? <span className="text-[#c5221f]">Add at least one recipient</span>
+        : status === "error" ? <span className="text-[#c5221f]">Couldn't save draft</span>
+        : online && status === "saved" ? <span className="text-[var(--sub)]">Draft saved</span>
+        : online && status === "restored" ? <span className="text-[var(--sub)]">Draft restored</span> : null}
+    </span>
+  );
+}
+
+function Composer({ threadId, target, online, waiting = [], onSend, onClose, onDraftChange }) {
+  const { first } = useNames();
+  const defaults = useMemo(() => T.replyRecipients(target, ME), [target]);
+  const draft = useReplyDraft({ threadId, target, defaults, onDraftChange });
+  const { text, to, cc } = draft;
+  const [newRecipient, setNewRecipient] = useState("");
+
+  const hasContent = text.trim() !== "" && to.length > 0;
+  const canSend = online && hasContent;
+  const unaddressedWaiting = waiting.filter((name) => ![...to, ...cc].some((x) => x.toLowerCase() === name.toLowerCase()));
+
+  // Offline never queues implicitly: Ctrl+Enter goes through send() and is a no-op; only the explicit button queues.
+  const send = (queued = false) => {
+    if (draft.isFinished() || !(queued ? hasContent && !online : canSend)) return;
+    draft.finish();
+    onSend({ text, to, cc }, { queued });
+  };
+  const discard = () => { draft.finish(); onClose(); };
+  const addRecipient = () => {
+    const value = newRecipient.trim().replace(/[,;]$/, "");
+    if (value) {
+      draft.setTo((prev) => T.uniq([...prev, value]));
+      draft.setCc((prev) => prev.filter((x) => x.toLowerCase() !== value.toLowerCase()));
+    }
+    setNewRecipient("");
+  };
+
+  return (
+    <div className="fade-in mt-3 rounded-2xl border border-[var(--line)] bg-white shadow-[0_1px_3px_rgba(60,64,67,.15)] overflow-hidden" data-composer={target.id}>
+      <div className="px-4 pt-3 pb-2 flex items-center gap-2 text-[13px] text-[var(--sub)]">
+        <Icon name="reply" size={18} />
+        <span className="truncate">Replying to <span className="text-[var(--text)] font-medium">{shownSender(target.from)}</span></span>
+        {cc.length > 0 && (
+          <button className="link-btn ml-auto whitespace-nowrap" onClick={() => draft.setCc([])}>
+            {to.length === 1 ? `Reply only to ${first(to[0])}` : `Remove ${cc.length} Cc`}
+          </button>
+        )}
+      </div>
+      <RecipientRow label="To">
+        {to.map((name) => <RecipientChip key={name} name={name} onRemove={() => draft.setTo(to.filter((x) => x !== name))} />)}
+        <input value={newRecipient} onChange={(e) => setNewRecipient(e.target.value)} onBlur={addRecipient} aria-label="Add recipient"
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); addRecipient(); } }}
+          placeholder={to.length ? "" : "Add a recipient"} className="flex-1 min-w-[80px] outline-none bg-transparent h-6" />
+      </RecipientRow>
+      <RecipientRow label="Cc">
+        {cc.length
+          ? cc.map((name) => <RecipientChip key={name} name={name} onRemove={() => draft.setCc(cc.filter((x) => x !== name))} />)
+          : <span className="text-[var(--sub)]">–</span>}
+      </RecipientRow>
+      {unaddressedWaiting.length > 0 && (
+        <WaitingNudge people={unaddressedWaiting} onAddToCc={() => draft.setCc((prev) => T.uniq([...prev, ...unaddressedWaiting]))} />
+      )}
+      <textarea autoFocus rows={4} value={text} placeholder="Write a reply" aria-label={`Reply to ${target.from}`}
+        onChange={(e) => draft.setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") { e.stopPropagation(); onClose(); }
+          else if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
+        }}
+        className="w-full px-4 py-3 text-sm outline-none resize-none border-t border-[#f1f3f4] bg-transparent" />
+      <div className="px-3 pb-3 flex items-center gap-2 flex-wrap">
+        <button className="btn btn-primary" disabled={!canSend} onClick={() => send()} title={online ? "Send (Ctrl/⌘+Enter)" : "You're offline – use Queue for later"}>Send</button>
+        {!online && (
+          <button className="btn" data-queue disabled={!hasContent} onClick={() => send(true)} title="Sends automatically when you're back online">
+            <Icon name="schedule_send" size={18} />Queue for later
+          </button>
+        )}
+        <DraftStatus online={online} recipientCount={to.length} status={draft.status} />
+        <button className="icon-btn ml-auto" onClick={discard} title="Discard draft" aria-label="Discard draft"><Icon name="delete" /></button>
+      </div>
+    </div>
+  );
+}
+
+// Thread context
+
+const ThreadContext = React.createContext(null);
+const useThread = () => useContext(ThreadContext);
+
+/** Ledger status chip for a question/blocker, plus the manual override; clicking the chip jumps to what closed it. */
+function StatusChip({ item, className = "" }) {
+  const { who } = useNames();
+  const { jumpTo, toggleResolved } = useThread();
+  if (item.type === "decision") return null;
+  const resolved = item.state === "resolved";
+  const label = resolved ? (item.manual ? "Marked resolved" : `Resolved · ${who(item.by.from)}`)
+    : item.type === "question" && item.asked.length ? `Awaiting ${item.asked.map(who).join(", ")}` : "Unresolved";
+  const tone = resolved ? "bg-[#e6f4ea] text-[#137333]" : "bg-[#fef7e0] text-[#a05600]";
+  const affordance = item.by ? "hover:brightness-95 cursor-pointer" : "cursor-default";
+  return (
+    <span className={`inline-flex items-center gap-1 shrink-0 ${className}`}>
+      <button data-status={item.state} data-status-for={item.key} disabled={!item.by} onClick={() => item.by && jumpTo(item.by.id)}
+        title={item.by ? `${item.by.from} · ${item.by.date} — jump to the reply` : undefined}
+        className={`text-xs rounded-full px-2 h-5 whitespace-nowrap ${tone} ${affordance}`}>{label}</button>
+      <button className="link-btn whitespace-nowrap" data-toggle-resolved={item.key} onClick={() => toggleResolved(item)}>{resolved ? "Reopen" : "Mark resolved"}</button>
+    </span>
+  );
+}
+
+// Message
+
+function AudienceDriftBadges({ drift, waitingNames }) {
+  const { who } = useNames();
+  const { peopleByName } = useThread();
+  const describe = (name) => {
+    const person = peopleByName.get(name);
+    const lastWrote = person && person.lastActive ? `last wrote ${person.lastActive.date}` : "has not written in this thread";
+    return `${name} — ${lastWrote}${person && person.pending.length ? " · waiting on an answer" : ""}`;
+  };
+  const stillOwedAnswer = drift.dropped.some((name) => waitingNames.has(name.toLowerCase()));
+  return (
+    <div data-delta className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs mb-2">
+      {drift.dropped.length > 0 && (
+        <span data-delta-dropped tabIndex={0} title={drift.dropped.map(describe).join("\n")}
+          aria-label={`Dropped from this reply: ${T.listNames(drift.dropped.map(who), 5)}. ${describe(drift.dropped[0])}`}
+          className={`inline-flex items-center gap-1 max-w-full rounded-full px-2 min-h-5 py-0.5 ${stillOwedAnswer ? "bg-[#fef7e0] text-[#7a4b00]" : "bg-[var(--surface)] text-[var(--sub)]"}`}>
+          <Icon name="person_remove" size={14} className="shrink-0" />
+          <span className="min-w-0 wrap-any">Dropped {T.listNames(drift.dropped.map(who))}{stillOwedAnswer && " (still waiting on an answer)"}</span>
+        </span>
+      )}
+      {drift.added.length > 0 && (
+        <span data-delta-added className="inline-flex items-center gap-1 max-w-full rounded-full px-2 min-h-5 py-0.5 bg-[var(--surface)] text-[var(--sub)]">
+          <Icon name="person_add" size={14} className="shrink-0" /><span className="min-w-0 wrap-any">Added {T.listNames(drift.added.map(who))}</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ActionItemList({ items }) {
+  return (
+    <ul className="mt-2 space-y-1">
+      {items.map((item) => (
+        <li key={item.key} data-action-row={item.key} className="flex items-center gap-2 text-[13px] flex-wrap">
+          <Icon name={ITEM_KIND[item.type].icon} fill size={16} color={ITEM_KIND[item.type].color} />
+          <span className="min-w-0 wrap-any">{item.text}</span>
+          <StatusChip item={item} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function MessageText({ text, hasQuote }) {
+  if (text.trim() === "") {
+    return <span className="italic text-[var(--sub)]">{hasQuote ? "No new content – this message only quotes earlier text." : "(No message body)"}</span>;
+  }
+  return T.tokenizeMentions(text).map((part, i) => (part.mention
+    ? <span key={i} className={`rounded px-1 ${T.mentionsMe(part.text, ME) ? "text-[var(--blue)] bg-[var(--blue-soft)]" : "text-[var(--sub)] bg-[var(--surface)]"}`}>{part.text}</span>
+    : <React.Fragment key={i}>{part.text}</React.Fragment>));
+}
+
+/** Quoted history: hidden behind a "···" toggle unless the global "show quoted text" switch is on. */
+function QuotedHistory({ quoted, lineCount, collapsible }) {
+  const [shown, setShown] = useState(false);
+  if (!quoted) return null;
+  return (
+    <>
+      {collapsible && (
+        <button onClick={() => setShown((s) => !s)} aria-expanded={shown} data-quote-toggle aria-label="Toggle quoted text"
+          title={`${shown ? "Hide" : "Show"} quoted text (${lineCount} lines)`}
+          className="mt-2 h-4 px-2 rounded-full bg-[#e8eaed] hover:bg-[#dadce0] text-[var(--sub)] flex items-center leading-none">
+          <span className="text-[13px] tracking-widest -mt-1.5">···</span>
+        </button>
+      )}
+      {(!collapsible || shown) && (
+        <pre data-quoted className="mt-2 text-[13px] text-[var(--sub)] border-l-2 border-[var(--line)] pl-3 whitespace-pre-wrap wrap-any font-sans">{quoted}</pre>
+      )}
+    </>
+  );
+}
+
+function MessageHeader({ node, open, isNew, hasDraft, deep, parent, drift, items, mentionsYou, snippet }) {
+  const { first } = useNames();
+  const { toggleExpanded, setActiveId } = useThread();
+  return (
+    <div role="button" tabIndex={0} aria-expanded={open} data-header
+      onClick={() => toggleExpanded(node.id)} onFocus={() => setActiveId(node.id)}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleExpanded(node.id); } }}
+      className="flex-1 min-w-0 flex items-start gap-3 px-3 py-2.5 cursor-pointer rounded-2xl outline-none focus-visible:ring-2 focus-visible:ring-[var(--blue)]">
+      <Avatar name={node.from} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 h-8 min-w-0">
+          {isNew && <span data-new title="New since your last visit" className="w-2 h-2 rounded-full bg-[var(--blue)] shrink-0"><span className="sr-only">New</span></span>}
+          <span className={`text-sm truncate min-w-[2.5rem] ${isNew ? "font-bold" : "font-medium"}`} title={node.from}>{shownSender(node.from)}</span>
+          {hasDraft && !open && <span className="text-xs text-[#c5221f] shrink-0">Draft</span>}
+          {deep && parent && (
+            <span data-deep-pill className="inline-flex items-center gap-1 text-xs text-[var(--sub)] bg-[var(--surface)] rounded-full pr-2 pl-0.5 h-5 shrink-0 max-w-[40%]">
+              <Avatar name={parent.from} size={16} /><Icon name="subdirectory_arrow_right" size={12} /><span className="truncate">{first(parent.from)}</span>
+            </span>
+          )}
+          {node.fallback && (
+            <span data-fallback={node.fallback} title={FALLBACK_TIP[node.fallback]} className="text-[var(--sub)] cursor-help flex shrink-0"><Icon name="info" size={16} /></span>
+          )}
+          {node.pending && (
+            <span data-pending-chip className="inline-flex items-center gap-1 text-xs bg-[#fef7e0] text-[#7a4b00] rounded-full px-2 h-5 shrink-0"><Icon name="schedule" size={14} />Queued</span>
+          )}
+          {drift && drift.dropped.length > 0 && !open && (
+            <span data-delta-icon title={`Dropped from this reply: ${drift.dropped.join(", ")}`} className="shrink-0 flex"><Icon name="person_remove" size={16} color="var(--sub)" /></span>
+          )}
+          {mentionsYou && <span title="Mentions you" className="shrink-0 flex"><Icon name="alternate_email" size={16} color="var(--blue)" /></span>}
+          {!open && items.map((item) => (
+            <Icon key={item.key} name={ITEM_KIND[item.type].icon} fill size={16} color={ITEM_KIND[item.type].color} className={`shrink-0 ${item.state === "resolved" ? "opacity-40" : ""}`} />
+          ))}
+          <span className="ml-auto pl-1 text-xs text-[var(--sub)] whitespace-nowrap shrink-0">
+            <span className="sm:hidden">{node.dateShort}</span><span className="hidden sm:inline">{node.date}</span>
+          </span>
+        </div>
+        {!open && <div className={`text-[13px] truncate -mt-1 ${isNew ? "text-[var(--text)]" : "text-[var(--sub)]"}`}>{snippet}</div>}
+        {open && (
+          <div className="text-xs text-[var(--sub)] -mt-1 truncate">
+            to {node.to.length ? node.to.map(first).join(", ") : "nobody"}{node.cc.length > 0 && <>, cc {node.cc.map(first).join(", ")}</>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Per-message action buttons on the right edge: focus branch, fold replies, quick reply. */
+function MessageActions({ node, folded, canFocus, focused }) {
+  const { multi, toggleFocus, toggleFold, openReply } = useThread();
+  const showFold = node.children.length > 0 && multi;
+  return (
+    <div className="flex items-center pt-1.5 pr-1.5 shrink-0">
+      {canFocus && (
+        <button className="icon-btn !w-8 !h-8" data-focus-btn aria-pressed={focused} onClick={() => toggleFocus(node.id)}
+          aria-label={focused ? "Show all branches" : "Focus on this branch"} title={focused ? "Show all branches (Esc)" : "Focus on this branch (b)"}>
+          <Icon name="filter_center_focus" size={18} color={focused ? "var(--blue)" : undefined} />
+        </button>
+      )}
+      {showFold && (
+        <button className="icon-btn !w-8 !h-8" data-fold-btn onClick={() => toggleFold(node.id)}
+          aria-label={folded ? `Show ${node.size} replies` : `Fold ${node.size} replies`} title={folded ? `Show ${node.size} replies (f)` : `Fold ${node.size} replies (f)`}>
+          <Icon name={folded ? "add_box" : "indeterminate_check_box"} size={18} />
+        </button>
+      )}
+      <button className="icon-btn !w-8 !h-8 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 hidden sm:inline-flex" data-reply-icon
+        title="Reply to this message (r)" aria-label={`Reply to ${node.from}`} onClick={() => openReply(node.id)}>
+        <Icon name="reply" size={18} />
+      </button>
+    </div>
+  );
+}
+
+function MessageBody({ node, text, quoted, quotedLines, drift, items, hasDraft }) {
+  const t = useThread();
+  const waitingNames = useMemo(() => new Set(t.waitingPeople.map((n) => n.toLowerCase())), [t.waitingPeople]);
+  return (
+    <div className="pl-3 sm:pl-[60px] pr-4 pb-4 -mt-1">
+      {node.pending && <div className="text-xs text-[#7a4b00] mb-2" data-pending-note>Queued – this reply will be sent as soon as you're back online.</div>}
+      {drift && <AudienceDriftBadges drift={drift} waitingNames={waitingNames} />}
+      <div className="text-sm leading-6 whitespace-pre-wrap wrap-any"><MessageText text={text} hasQuote={!!quoted} /></div>
+      {items.length > 0 && <ActionItemList items={items} />}
+      <QuotedHistory quoted={quoted} lineCount={quotedLines} collapsible={t.hideQuotes} />
+      {t.replyingTo !== node.id ? (
+        <div className="mt-4 flex gap-2">
+          <button className="btn" data-reply-btn={node.id} onClick={() => t.openReply(node.id)}>
+            <Icon name="reply" size={18} />{hasDraft ? "Continue draft" : "Reply"}
+          </button>
+        </div>
+      ) : (
+        <Composer threadId={t.threadId} target={node} online={t.online} waiting={t.waitingPeople}
+          onClose={() => t.closeReply(node.id)} onSend={(payload, opts) => t.sendReply(node, payload, opts)} onDraftChange={t.setDraftPresence} />
+      )}
+    </div>
+  );
+}
+
+function MessageNode({ node }) {
+  const t = useThread();
+  const outsideFocus = !!t.lineage && !t.lineage.has(node.id);
+  const open = t.expanded.has(node.id) && !outsideFocus;
+  const folded = t.folded.has(node.id) || outsideFocus;
+  const hasChildren = node.children.length > 0;
+  const parent = node.parentId != null ? t.byId.get(node.parentId) : null;
+  const { text, quoted, quotedLines } = useMemo(() => T.splitQuoted(node.body), [node.body]);
+  const items = t.itemsByMessage.get(node.id) || [];
+  const drift = t.audienceDrift.get(node.id);
+  const focused = t.focusId === node.id;
+  const canFocus = t.multi && (t.forkHeadIds.has(node.id) || focused);
+  const indentClamped = node.depth >= t.indentLimit;
+  const childrenClass = indentClamped
+    ? "ml-0 pl-3 sm:pl-4 border-l-2 border-[#a8c7fa]"
+    : "ml-3.5 pl-2 sm:ml-4 sm:pl-5 border-l border-[var(--line)]";
+  const replyWord = node.size === 1 ? "reply" : "replies";
+
+  return (
+    <div data-mid={node.id} data-depth={node.depth} data-outside={outsideFocus ? "1" : undefined}
+      className={`transition-opacity duration-150 ${outsideFocus ? "opacity-40" : ""}`}>
+      <div id={`msg-${node.id}`}
+        className={`msg-card group rounded-2xl transition-colors ${open ? "bg-white border border-[var(--line)] my-1" : "hover:bg-[var(--hover)] border border-transparent"}`}>
+        <div className="flex items-start">
+          <MessageHeader node={node} open={open} isNew={t.newIds.has(node.id)} hasDraft={t.drafts.has(node.id)}
+            deep={node.depth > t.indentLimit} parent={parent} drift={drift} items={items}
+            mentionsYou={node.from !== ME && T.mentionsMe(text, ME)}
+            snippet={T.firstLine(text) || (quoted ? "(only quotes earlier messages)" : "(no message body)")} />
+          <MessageActions node={node} folded={folded} canFocus={canFocus} focused={focused} />
+        </div>
+        {open && <MessageBody node={node} text={text} quoted={quoted} quotedLines={quotedLines} drift={drift} items={items} hasDraft={t.drafts.has(node.id)} />}
+      </div>
+      {hasChildren && !folded && <div className={childrenClass}>{node.children.map((child) => <MessageNode key={child.id} node={child} />)}</div>}
+      {hasChildren && folded && (
+        <div className={childrenClass}>
+          <button data-unfold className="link-btn my-1 ml-2" onClick={() => (outsideFocus ? t.clearFocus() : t.toggleFold(node.id))}>
+            {outsideFocus ? `+ ${node.size} unselected ${replyWord}` : `+ ${node.size} ${replyWord}`}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Overview
+
+function CatchUpBanner({ summary, onNext, onMarkAllRead }) {
+  if (!summary.count) return null;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const details = [`${summary.branches} ${summary.branches === 1 ? "branch" : "branches"}`];
+  if (summary.decisions) details.push(plural(summary.decisions, "decision"));
+  if (summary.questionsForMe) details.push(`${plural(summary.questionsForMe, "question")} for you`);
+  else if (summary.mentions) details.push(`${plural(summary.mentions, "mention")} of you`);
+  return (
+    <div data-catchup role="status" className="flex items-center gap-x-3 gap-y-1 flex-wrap rounded-2xl bg-[#e8f0fe] px-4 py-2 mb-3 text-[13px]">
+      <Icon name="mark_email_unread" size={18} color="var(--blue)" />
+      <span className="min-w-0">
+        <b>{summary.count} new {summary.count === 1 ? "reply" : "replies"}</b> since {T.formatDate(summary.since, Date.now(), true)} · {details.join(" · ")}
+      </span>
+      <span className="ml-auto flex items-center gap-1">
+        <button className="link-btn whitespace-nowrap" data-next-unread onClick={() => onNext()}>Jump to first (n)</button>
+        <button className="link-btn whitespace-nowrap" data-mark-read onClick={onMarkAllRead}>Mark all read</button>
+      </span>
+    </div>
+  );
+}
+
+function PeopleAvatars({ people }) {
+  return (
+    <div className="hidden sm:flex -space-x-1.5 shrink-0">
+      {people.slice(0, 8).map((p) => (
+        <span key={p.name} data-person={p.name} data-dropped={p.dropped ? "1" : "0"} data-pending={p.pending.length} title={`${p.name}${p.note ? " — " + p.note : ""}`}
+          className={`relative rounded-full ring-2 ring-[var(--surface)] ${p.dropped ? "opacity-40 grayscale" : ""}`}>
+          <Avatar name={p.name} size={24} />
+          {p.pending.length > 0 && <span className="absolute -right-0.5 -top-0.5 w-2.5 h-2.5 rounded-full bg-[#f9ab00] ring-2 ring-[var(--surface)]" />}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function PeopleStatusLine({ people }) {
+  const { who } = useNames();
+  const waiting = people.filter((p) => p.pending.length);
+  const dropped = people.filter((p) => p.dropped);
+  if (!waiting.length && !dropped.length) return null;
+  return (
+    <div data-people-status className="px-4 pb-2 -mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--sub)]">
+      {waiting.length > 0 && (
+        <span className="inline-flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[#f9ab00]" />Waiting on {T.listNames(waiting.map((p) => who(p.name)))}</span>
+      )}
+      {dropped.length > 0 && (
+        <span className="inline-flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-[#bdc1c6]" />{T.listNames(dropped.map((p) => who(p.name)))} dropped off the latest replies</span>
+      )}
+    </div>
+  );
+}
+
+function BranchChips({ heads, focusId, onToggle }) {
+  const { first } = useNames();
+  const chipClass = (active) => `shrink-0 h-7 px-3 rounded-full text-xs border whitespace-nowrap ${active
+    ? "bg-[var(--blue-soft)] border-transparent text-[var(--blue)] font-medium"
+    : "border-[#c4c7c5] hover:bg-[var(--hover)]"}`;
+  return (
+    <div className="px-3 pb-2 flex items-center gap-1.5 overflow-x-auto" aria-label="Branches">
+      <span className="text-xs text-[var(--sub)] pl-1 shrink-0">Branches</span>
+      {heads.map((head) => (
+        <button key={head.id} data-branch-chip={head.id} aria-pressed={focusId === head.id} onClick={() => onToggle(head.id)} title="Focus on this branch"
+          className={chipClass(focusId === head.id)}>
+          {branchLabel(head, first)} · {head.size + 1}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The resolution ledger. It leads with what still needs someone; resolved items and decisions (the audit
+ * trail) are one click away. A row toggled this visit stays put so it can be undone instead of vanishing.
+ */
+function Ledger({ items, recent }) {
+  const { first } = useNames();
+  const { jumpTo } = useThread();
+  const [showAll, setShowAll] = useState(false);
+  const ordered = useMemo(() => [...items].sort((a, b) => (a.state === "open" ? 0 : 1) - (b.state === "open" ? 0 : 1)), [items]);
+  const visible = ordered.filter((item) => showAll || item.state === "open" || recent.has(item.key));
+  const hiddenCount = items.length - visible.length;
+  return (
+    <div className="pb-2">
+      {visible.length === 0 && (
+        <p data-caught-up className="px-4 py-1 text-[13px] text-[var(--sub)] flex items-center gap-2">
+          <Icon name="task_alt" size={18} color="#188038" />All caught up – nothing is waiting on anyone.
+        </p>
+      )}
+      {visible.length > 0 && (
+        <ul className="px-2 max-h-56 overflow-auto" data-ledger>
+          {visible.map((item) => (
+            <li key={item.key} className="flex flex-col sm:flex-row sm:items-center gap-x-1 rounded-2xl sm:rounded-full hover:bg-[var(--hover)] sm:pr-2">
+              <button data-overview-item onClick={() => jumpTo(item.id)} className="flex-1 min-w-0 flex items-start sm:items-center gap-3 px-2 py-1.5 sm:py-0 sm:h-9 rounded-2xl sm:rounded-full text-left">
+                <Icon name={ITEM_KIND[item.type].icon} fill size={18} color={ITEM_KIND[item.type].color} className={`shrink-0 mt-0.5 sm:mt-0 ${item.state === "resolved" ? "opacity-40" : ""}`} />
+                <span className={`text-[13px] line-clamp-2 sm:truncate ${item.state === "resolved" ? "text-[var(--sub)]" : ""}`}>{item.text}</span>
+                <span className="ml-auto text-xs text-[var(--sub)] whitespace-nowrap hidden md:block">{ITEM_KIND[item.type].label} · {first(item.from)}</span>
+              </button>
+              <StatusChip item={item} className="pl-10 pb-1.5 sm:p-0" />
+            </li>
+          ))}
+        </ul>
+      )}
+      {(hiddenCount > 0 || showAll) && (
+        <button data-ledger-toggle aria-expanded={showAll} onClick={() => setShowAll((v) => !v)} className="link-btn ml-4 mt-1 inline-flex items-center gap-1">
+          <Icon name={showAll ? "expand_less" : "expand_more"} size={16} />
+          {showAll ? "Hide resolved & decisions" : `Show ${hiddenCount} resolved & decisions`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Overview({ tree, analysis, recent }) {
+  const [expanded, setExpanded] = useState(true);
+  const { jumpTo, focusId, toggleFocus } = useThread();
+  const { people, items, openCount } = analysis;
+  const messages = tree.messages;
+  const mentionsOfMe = messages.filter((m) => m.from !== ME && T.mentionsMe(T.splitQuoted(m.body).text, ME));
+  const placedByTime = messages.filter((m) => m.fallback).length;
+  const forkHeads = T.findForkHeads(tree).map((h) => tree.byId.get(h.id)).slice(0, 8);
+  const branches = T.countBranches(tree);
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  return (
+    <section className="rounded-2xl bg-[var(--surface)] mb-4 overflow-hidden" aria-label="Thread overview">
+      <div className="flex items-center gap-3 px-4 min-h-12 py-1">
+        <PeopleAvatars people={people} />
+        <span className="text-[13px] text-[var(--sub)] min-w-0">
+          {plural(people.length, "person", "people")} · {messages.length} messages · {plural(branches, "branch", "branches")}
+          {items.some((i) => i.type !== "decision") && (
+            <> · <span data-open-count className={openCount ? "text-[#a05600] font-medium" : ""}>{openCount} open</span></>
+          )}
+          {mentionsOfMe.length > 0 && (
+            <> · <button className="link-btn !p-0" onClick={() => jumpTo(mentionsOfMe[0].id)}>{plural(mentionsOfMe.length, "mention", "mentions")} of you</button></>
+          )}
+          {placedByTime > 0 && <span title="Placed by time because reply information was missing or inconsistent"> · {placedByTime} placed by time</span>}
+        </span>
+        <button className="icon-btn ml-auto !w-8 !h-8" onClick={() => setExpanded((v) => !v)} aria-expanded={expanded} aria-label={expanded ? "Collapse overview" : "Expand overview"}>
+          <Icon name={expanded ? "expand_less" : "expand_more"} />
+        </button>
+      </div>
+      {expanded && <PeopleStatusLine people={people} />}
+      {expanded && forkHeads.length > 0 && <BranchChips heads={forkHeads} focusId={focusId} onToggle={toggleFocus} />}
+      {expanded && items.length > 0 && <Ledger items={items} recent={recent} />}
+    </section>
+  );
+}
+
+/** Rail of ticks: indent = reply depth (clamped like the tree), grey = on screen, blue = current, light blue = unread. */
+function Minimap({ messages, activeId, newIds, inView }) {
+  const { jumpTo } = useThread();
+  return (
+    <nav aria-label="Thread minimap" data-minimap className="hidden xl:flex fixed right-5 top-1/2 -translate-y-1/2 flex-col items-start gap-1.5 py-2 max-h-[70vh] overflow-y-auto">
+      {messages.map((m) => {
+        const onScreen = inView.has(m.id), current = activeId === m.id, unread = newIds.has(m.id);
+        const shade = current ? "w-5 h-1.5 bg-[var(--blue)]"
+          : onScreen ? "w-4 h-1.5 bg-[#5f6368]"
+          : unread ? "w-3 h-1 bg-[#8ab4f8] group-hover:bg-[var(--blue)]"
+          : "w-3 h-1 bg-[#c4c7c5] group-hover:bg-[var(--sub)]";
+        return (
+          <button key={m.id} onClick={() => jumpTo(m.id)} data-tick={m.id} data-inview={onScreen ? "1" : "0"} data-tick-depth={Math.min(m.depth, 3)}
+            title={`${shownSender(m.from)} · ${m.date}${unread ? " · new" : ""}`} aria-label={`Jump to message from ${m.from}`} aria-current={current}
+            style={{ marginLeft: Math.min(m.depth, 3) * 3 }} className="h-2.5 shrink-0 flex items-center group">
+            <span className={`block rounded-full transition-all duration-150 ${shade}`} />
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+// Thread controller
+
+let localMessageCounter = 0;
+const newLocalId = () => `local-${Date.now().toString(36)}-${++localMessageCounter}`;
+const overviewSelector = '[aria-label="Thread overview"]';
+
+/** Wires the smaller hooks together and exposes everything the thread UI needs. */
+function useThreadController(thread) {
+  const [messages, setMessages] = useState(thread.messages);
+  const tree = useMemo(() => T.buildThreadTree(messages), [messages]);
+  const { root, byId } = tree;
+  const multi = tree.messages.length > 1;
+
+  const reading = useReadTracking({ threadId: thread.id, threadLastSeen: thread.lastSeen, firstMessageTime: root ? root._eff : null });
+  const ledger = useResolutionLedger(thread.id);
+  const analysis = useMemo(
+    () => T.analyzeThread(tree, { me: ME, lastSeen: reading.lastSeen, manual: ledger.manual, read: reading.read }),
+    [tree, reading.lastSeen, ledger.manual, reading.read]);
+  const { newIds } = analysis;
+
+  const allNames = useMemo(() => analysis.people.map((p) => p.name), [analysis]);
+  const names = useMemo(() => makeNamer(allNames), [allNames]);
+  const peopleByName = useMemo(() => new Map(analysis.people.map((p) => [p.name, p])), [analysis]);
+  const waitingPeople = useMemo(() => analysis.people.filter((p) => p.pending.length && p.name !== ME).map((p) => p.name), [analysis]);
+  const itemsByMessage = useMemo(() => {
+    const byMessage = new Map();
+    analysis.items.forEach((item) => byMessage.set(item.id, [...(byMessage.get(item.id) || []), item]));
+    return byMessage;
+  }, [analysis]);
+  const forkHeadIds = useMemo(() => new Set(T.findForkHeads(tree).map((h) => h.id)), [tree]);
+
+  const branchTipIds = () => tree.messages.filter((n) => n.children.length === 0 || !multi).map((n) => n.id);
+  const disclosure = useDisclosure(() => new Set([...branchTipIds(), ...newIds]));
+  const { announcement, announce } = useAnnouncer();
+  const focus = useBranchFocus(tree, disclosure.folded, (node) => branchLabel(node, names.first), announce);
+
+  const [dedupeQuotes, setDedupeQuotes] = useState(true);
+  const [replyingTo, setReplyingTo] = useState(null);
+  const [activeId, setActiveId] = useState(null);
+  const [drafts, setDrafts] = useState(() => Store.draftedMessageIds(thread.id));
+  const [simulateOffline, setSimulateOffline] = useState(false);
+  const online = useOnlineStatus(simulateOffline);
+  const narrow = useNarrowViewport();
+  const suppressSpyUntil = useRef(0);
+
+  const inView = useScrollTracking({
+    enabled: multi, messageCount: tree.messages.length, hiddenIds: focus.hiddenIds, expanded: disclosure.expanded,
+    suppressUntil: suppressSpyUntil, onCurrent: setActiveId,
+  });
+
+  const setDraftPresence = useCallback((id, hasText) => setDrafts((prev) => {
+    if (prev.has(id) === hasText) return prev;
+    const next = new Set(prev);
+    if (hasText) next.add(id); else next.delete(id);
+    return next;
+  }), []);
+
+  const toggleExpanded = useCallback((id) => {
+    disclosure.toggleExpanded(id);
+    reading.markRead(id);
+  }, [disclosure.toggleExpanded, reading.markRead]);
+
+  const openReply = useCallback((id) => {
+    disclosure.expand(id);
+    reading.markRead(id);
+    setReplyingTo(id);
+  }, [disclosure.expand, reading.markRead]);
+
+  const closeReply = useCallback((id) => {
+    setReplyingTo((current) => (current === id ? null : current));
+    requestAnimationFrame(() => { const button = document.querySelector(`[data-reply-btn="${CSS.escape(String(id))}"]`); if (button) button.focus(); });
+  }, []);
+
+  /** Scrolls a message into view, first revealing it if a fold or focus mode is hiding it. */
+  const jumpTo = (id, { scroll = true } = {}) => {
+    suppressSpyUntil.current = Date.now() + 900;
+    if (focus.lineage && !focus.lineage.has(String(id))) focus.clearFocus();
+    disclosure.unfold(T.ancestorIds(byId, id));
+    disclosure.expand(id);
+    reading.markRead(id);
+    setActiveId(id);
+    if (!scroll) return;
+    setTimeout(() => {
+      const card = document.getElementById(`msg-${id}`);
+      if (!card) return;
+      const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      card.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+      card.classList.remove("flash"); void card.offsetWidth; card.classList.add("flash"); // reflow restarts the animation
+    }, 30);
+  };
+
+  const jumpToNextUnread = (from) => {
+    const target = T.findNextUnread(tree, newIds, from != null ? from : activeId);
+    if (!target) return;
+    jumpTo(target);
+    const remaining = newIds.size - 1;
+    announce(`Unread reply from ${names.who(byId.get(target).from)}. ${remaining} unread ${remaining === 1 ? "reply" : "replies"} left.`);
+    setTimeout(() => focusMessageHeader(target, { preventScroll: true }), 90);
+  };
+
+  const toggleResolved = useCallback((item) => {
+    // The ledger re-sorts after a toggle, which drops focus; remember which control had it and restore it.
+    const active = document.activeElement;
+    const focusedKey = active && active.dataset ? active.dataset.toggleResolved : null;
+    const wasInOverview = !!(active && active.closest && active.closest(overviewSelector));
+    announce(ledger.toggleResolved(item));
+    if (!focusedKey) return;
+    requestAnimationFrame(() => {
+      const match = [...document.querySelectorAll(`[data-toggle-resolved="${CSS.escape(focusedKey)}"]`)]
+        .find((el) => !!el.closest(overviewSelector) === wasInOverview);
+      if (match && document.activeElement !== match) match.focus();
+    });
+  }, [ledger.toggleResolved, announce]);
+
+  const sendReply = (parent, { text, to, cc }, { queued = false } = {}) => {
+    const id = newLocalId();
+    const body = `${text.trimEnd()}\n\n${T.quoteBlock(parent)}`;
+    setMessages((prev) => [...prev, { id, parent: parent.id, from: ME, to, cc, ts: new Date().toISOString(), body, pending: queued }]);
+    disclosure.expand(id);
+    disclosure.unfold([parent.id]);
+    setReplyingTo(null);
+    announce(queued ? `Reply to ${parent.from} queued. It will be sent when you are back online.` : `Reply sent to ${parent.from}.`);
+    setTimeout(() => { jumpTo(id); setTimeout(() => focusMessageHeader(id, { preventScroll: true }), 40); }, 60);
+  };
+
+  // Queued replies go out the moment connectivity returns.
+  const queuedCount = tree.messages.filter((m) => m.pending).length;
+  useEffect(() => {
+    if (!online || queuedCount === 0) return;
+    setMessages((prev) => prev.map((m) => (m.pending ? { ...m, pending: false, ts: new Date().toISOString() } : m)));
+    announce(`Back online. ${queuedCount} queued ${queuedCount === 1 ? "reply was" : "replies were"} sent.`);
+  }, [online, queuedCount]); // eslint-disable-line react-hooks/exhaustive-deps -- flush once per transition, not per announce identity
+
+  const resolveOnMessage = (id) => {
+    const candidates = (itemsByMessage.get(id) || []).filter((i) => i.type !== "decision");
+    const target = candidates.find((i) => i.state === "open") || candidates[0];
+    if (target) toggleResolved(target); else announce("This message has no question or blocker to resolve.");
+  };
+
+  useThreadShortcuts({
+    root, hiddenIds: focus.hiddenIds, activeId, focusId: focus.focusId, clearFocus: focus.clearFocus,
+    navigateTo: (id) => { suppressSpyUntil.current = Date.now() + 900; setActiveId(id); focusMessageHeader(id); const el = findMessageElement(id); if (el) el.scrollIntoView({ block: "nearest" }); },
+    nextUnread: jumpToNextUnread, toggleOpen: toggleExpanded, toggleFold: disclosure.toggleFold,
+    toggleFocus: focus.toggleFocus, resolve: resolveOnMessage, reply: openReply,
+  });
+
+  return {
+    tree, root, byId, multi, analysis, newIds, announcement, names, allNames, online, queuedCount, recent: ledger.recent,
+    // toolbar state
+    dedupeQuotes, setDedupeQuotes, simulateOffline, setSimulateOffline,
+    showAllMessages: () => { disclosure.setExpandedIds(tree.messages.map((m) => m.id)); disclosure.clearFolds(); },
+    showBranchTips: () => disclosure.setExpandedIds(branchTipIds()),
+    markAllRead: () => { reading.markAllRead(); announce("All replies marked read."); },
+    markUnread: reading.markUnread,
+    jumpToNextUnread, activeId, inView, focus,
+    // shared with message components through ThreadContext
+    context: {
+      threadId: thread.id, byId, multi, online, drafts, newIds, itemsByMessage, audienceDrift: analysis.deltas, peopleByName, waitingPeople, forkHeadIds,
+      expanded: disclosure.expanded, folded: disclosure.folded, lineage: focus.lineage, focusId: focus.focusId,
+      hideQuotes: dedupeQuotes, replyingTo, indentLimit: narrow ? 2 : 3,
+      toggleExpanded, toggleFold: disclosure.toggleFold, toggleFocus: focus.toggleFocus, clearFocus: focus.clearFocus,
+      openReply, closeReply, sendReply, setActiveId, setDraftPresence, jumpTo, toggleResolved,
+    },
+  };
+}
+
+// Thread screen
+
+function ToolbarButton({ icon, label, onClick, active }) {
+  return (
+    <button onClick={onClick} title={label} aria-label={label} aria-pressed={active}
+      className={`icon-btn ${active ? "!bg-[var(--blue-soft)] !text-[var(--blue)]" : ""}`}><Icon name={icon} /></button>
+  );
+}
+
+const SHORTCUT_HINT = "Keyboard: j/k next/previous message · n next unread · b focus branch · Esc show all · o open/close · f fold · x resolve · r reply · Ctrl/⌘+Enter send";
+
+function ThreadToolbar({ c, onBack, position, total }) {
+  return (
+    <div className="flex items-center gap-0.5 px-2 h-12 sticky top-0 bg-white z-20 rounded-t-2xl">
+      <button className="icon-btn" onClick={onBack} aria-label="Back to Inbox" title="Back to Inbox"><Icon name="arrow_back" /></button>
+      <span className="w-px h-5 bg-[var(--line)] mx-2" aria-hidden="true" />
+      <span className="hidden sm:flex" aria-hidden="true"><Icon name="archive" className="mx-2 text-[var(--sub)]" /><Icon name="delete" className="mx-2 text-[var(--sub)]" /></span>
+      <ToolbarButton icon="mark_email_unread" label="Mark as unread (bring back the new-reply markers)" onClick={c.markUnread} />
+      <span className="flex-1" />
+      {c.multi && (
+        <>
+          <ToolbarButton icon="unfold_more" label="Expand all messages" onClick={c.showAllMessages} />
+          <ToolbarButton icon="unfold_less" label="Show only latest on each branch" onClick={c.showBranchTips} />
+          <ToolbarButton icon="format_quote" active={!c.dedupeQuotes} onClick={() => c.setDedupeQuotes((v) => !v)}
+            label={c.dedupeQuotes ? "Quoted text hidden – click to show" : "Quoted text visible – click to hide"} />
+        </>
+      )}
+      <ToolbarButton icon={c.simulateOffline ? "cloud_off" : "cloud_done"} label="Simulate offline (demo)" active={c.simulateOffline} onClick={() => c.setSimulateOffline((v) => !v)} />
+      <span className="icon-btn cursor-help hidden sm:inline-flex" title={SHORTCUT_HINT}><Icon name="keyboard" /></span>
+      <span className="text-xs text-[var(--sub)] ml-2 mr-2 hidden sm:block">{position} of {total}</span>
+    </div>
+  );
+}
+
+function StickyBanners({ c }) {
+  const { focus, byId, names, online, queuedCount } = c;
+  const focusNode = focus.focusId && byId.get(focus.focusId);
+  if (online && !(focusNode && focus.lineage)) return null;
+  return (
+    <div className="sticky top-12 z-10 space-y-2 mb-3">
+      {!online && (
+        <div data-offline-banner role="status" className="flex items-center gap-3 rounded-2xl bg-[#fef7e0] text-[#7a4b00] px-4 py-2 text-[13px]">
+          <Icon name="cloud_off" size={18} />
+          <span className="min-w-0">
+            You're offline. Sending is paused and drafts are saved on this device.
+            {queuedCount > 0 && <> <b>{queuedCount} {queuedCount === 1 ? "reply" : "replies"} queued.</b></>}
+          </span>
+        </div>
+      )}
+      {focusNode && focus.lineage && (
+        <div data-focus-banner className="flex items-center gap-3 rounded-full bg-[var(--blue-soft)] px-4 h-9 text-[13px]">
+          <Icon name="filter_center_focus" size={18} color="var(--blue)" />
+          <span className="truncate min-w-0">Focused on <b>{branchLabel(focusNode, names.first)}</b> · {focus.lineage.size} messages</span>
+          <button className="link-btn ml-auto whitespace-nowrap" onClick={focus.clearFocus}>Show all (Esc)</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThreadView({ thread, onBack, index, total }) {
+  const c = useThreadController(thread);
+  const subject = String(thread.subject || "").trim() || "(no subject)";
+  return (
+    <NamesContext.Provider value={c.allNames}>
+      <ThreadContext.Provider value={c.context}>
+        <div>
+          <ThreadToolbar c={c} onBack={onBack} position={index + 1} total={total} />
+          <div className="px-4 sm:px-6 pb-10 pt-2">
+            <div className="flex items-center gap-3 mb-4 pl-1 min-w-0">
+              <h1 className="text-[22px] leading-7 font-normal wrap-any min-w-0">{subject}</h1>
+              <span className="text-xs bg-[#e8eaed] rounded px-1.5 py-0.5 text-[var(--sub)]">Inbox</span>
+            </div>
+            {!c.root && (
+              <div className="text-center text-[var(--sub)] py-16">
+                <Icon name="mail" size={40} /><p className="mt-2 text-sm">This conversation has no messages.</p>
+              </div>
+            )}
+            {c.multi && <CatchUpBanner summary={c.analysis.summary} onNext={() => c.jumpToNextUnread()} onMarkAllRead={c.markAllRead} />}
+            {c.multi && <Overview tree={c.tree} analysis={c.analysis} recent={c.recent} />}
+            <StickyBanners c={c} />
+            {c.root && <MessageNode node={c.root} />}
+          </div>
+          {c.multi && <Minimap messages={c.tree.messages} activeId={c.activeId} newIds={c.newIds} inView={c.inView} />}
+          <div role="status" aria-live="polite" aria-atomic="true" className="sr-only" data-announcer>{c.announcement}</div>
+        </div>
+      </ThreadContext.Provider>
+    </NamesContext.Provider>
+  );
+}
+
+// Mailbox shell
+
+function InboxRow({ thread, onOpen }) {
+  let sender = "", subject = "", snippet = "", when = "", count = 0;
+  try {
+    const messages = T.buildThreadTree(thread.messages).messages;
+    const last = messages[messages.length - 1];
+    sender = T.uniq(messages.map((m) => plainFirstName(m.from))).slice(0, 3).join(", ");
+    subject = String(thread.subject || "").trim();
+    snippet = last ? (T.firstLine(T.splitQuoted(last.body).text) || "(no message body)") : "(no messages)";
+    when = last ? T.formatDate(last._ts, Date.now(), true) : "";
+    count = messages.length;
+  } catch {
+    subject = "(unreadable conversation)";
+  }
+  return (
+    <button onClick={() => onOpen(thread.id)} data-thread={thread.id}
+      className="w-full flex items-center gap-4 px-4 h-10 border-b border-[#f1f3f4] hover:shadow-[inset_1px_0_0_#dadce0,inset_-1px_0_0_#dadce0,0_1px_2px_0_rgba(60,64,67,.3)] hover:z-10 relative text-left bg-white">
+      <Icon name="check_box_outline_blank" className="text-[#bdc1c6] hidden sm:block" size={18} />
+      <Icon name="star" className="text-[#bdc1c6] hidden sm:block" size={18} />
+      <span className="w-28 sm:w-40 shrink-0 text-sm font-medium truncate">{sender || "(unknown)"}{count > 1 && <span className="text-xs text-[var(--sub)] font-normal ml-1">{count}</span>}</span>
+      <span className="text-sm truncate min-w-0"><span className="font-medium">{subject || "(no subject)"}</span><span className="text-[var(--sub)]"> – {snippet}</span></span>
+      <span className="ml-auto text-xs font-medium whitespace-nowrap">{when}</span>
+    </button>
+  );
+}
+
+function InboxList({ threads, onOpen }) {
+  return (
+    <div>
+      <div className="flex items-center h-12 px-4 border-b border-[var(--line)] gap-4 text-sm">
+        <span className="flex items-center gap-2 border-b-[3px] border-[var(--blue)] h-12 text-[var(--blue)] font-medium"><Icon name="inbox" />Primary</span>
+      </div>
+      {threads.length === 0 && (
+        <div className="text-center text-[var(--sub)] py-20"><Icon name="inbox" size={40} /><p className="mt-2 text-sm">Your inbox is empty.</p></div>
+      )}
+      {threads.map((thread) => <InboxRow key={thread.id} thread={thread} onOpen={onOpen} />)}
+    </div>
+  );
+}
+
+function AppBar() {
+  return (
+    <header className="h-16 flex items-center gap-2 px-4">
+      <button className="icon-btn" aria-label="Main menu"><Icon name="menu" size={24} /></button>
+      <div className="flex items-center gap-2 sm:w-[220px]">
+        <svg width="28" height="20" viewBox="0 0 28 20" aria-hidden="true"><path fill="#ea4335" d="M2 20h5V8.5L0 3.3V18a2 2 0 0 0 2 2z"/><path fill="#34a853" d="M21 20h5a2 2 0 0 0 2-2V3.3L21 8.5z"/><path fill="#fbbc04" d="M21 2v6.5l7-5.2V2.9C28 .9 25.7-.2 24.1 1z"/><path fill="#c5221f" d="M7 8.5V2l7 5.2L21 2v6.5l-7 5.2z"/><path fill="#ea4335" d="M0 2.9v.4l7 5.2V2L3.9 1C2.3-.2 0 .9 0 2.9z"/></svg>
+        <span className="text-[22px] text-[var(--sub)] hidden sm:block" style={{ fontFamily: "Roboto" }}>Gmail</span>
+      </div>
+      <div className="flex-1 max-w-[720px] h-12 rounded-full bg-[#eaf1fb] hover:bg-white hover:shadow-md transition flex items-center px-4 gap-3 text-[var(--sub)] min-w-0">
+        <Icon name="search" size={24} /><span className="text-base truncate">Search mail</span>
+        <Icon name="tune" className="ml-auto" />
+      </div>
+      <span className="flex-1 hidden sm:block" />
+      <div className="ml-2"><Avatar name={ME} size={32} /></div>
+    </header>
+  );
+}
+
+function SidebarItem({ icon, label, count, active }) {
+  return (
+    <div className={`flex items-center gap-4 h-8 pl-6 pr-3 rounded-r-full text-sm ${active ? "bg-[var(--blue-soft)] font-bold" : "hover:bg-[var(--hover)] text-[var(--text)]"}`}>
+      <Icon name={icon} fill={active} size={20} /><span className="flex-1">{label}</span>{count && <span className="text-xs font-medium">{count}</span>}
+    </div>
+  );
+}
+
+function Sidebar() {
+  return (
+    <aside className="hidden md:block w-[256px] shrink-0 pr-3" aria-hidden="true">
+      <button tabIndex={-1} className="flex items-center gap-4 h-14 pl-4 pr-6 ml-2 mb-4 rounded-2xl bg-[#c2e7ff] hover:shadow-md text-sm font-medium transition">
+        <Icon name="edit" size={24} />Compose
+      </button>
+      <SidebarItem icon="inbox" label="Inbox" count="3" active />
+      <SidebarItem icon="star" label="Starred" /><SidebarItem icon="schedule" label="Snoozed" />
+      <SidebarItem icon="send" label="Sent" /><SidebarItem icon="draft" label="Drafts" />
+    </aside>
+  );
+}
+
+function App() {
+  const [threads, setThreads] = useState(SAMPLE_THREADS);
+  const [openId, setOpenId] = useState(null);
+
+  // Installed only with ?e2e or ?testapi: lets the browser suite (and screenshot script) swap in fixtures and navigate deterministically.
+  useEffect(() => {
+    if (TEST_API_ENABLED) window.__testApi = { loadThreads: setThreads, openThread: setOpenId, sampleThreads: SAMPLE_THREADS };
+  }, []);
+
+  const index = threads.findIndex((t) => t.id === openId);
+  const backToInbox = () => setOpenId(null);
+  return (
+    <div className="min-h-screen flex flex-col">
+      <AppBar />
+      <div className="flex flex-1 pr-4 pb-4 pl-4 md:pl-0 min-w-0">
+        <Sidebar />
+        <main className="flex-1 min-w-0 bg-white rounded-2xl overflow-hidden">
+          <ErrorBoundary key={openId || "inbox"} onBack={backToInbox}>
+            {index >= 0
+              ? <ThreadView key={openId} thread={threads[index]} index={index} total={threads.length} onBack={backToInbox} />
+              : <InboxList threads={threads} onOpen={setOpenId} />}
+          </ErrorBoundary>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+<script>
+  // Browser test run: `index.html?e2e` loads the suite once the app has mounted.
+  if (/[?&]e2e\b/.test(location.search)) {
+    addEventListener("load", () => { const s = document.createElement("script"); s.src = "tests/ui-tests.js"; document.body.appendChild(s); });
+  }
+</script>
+</body>
+</html>
