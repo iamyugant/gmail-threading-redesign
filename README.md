@@ -46,7 +46,7 @@ It also works as a small mailbox. It has folders, search, stars, archive and tra
 |---|---|---|---|
 | Layout | Vertical tree, indent capped at 3 levels, 2 on phones | Graphs and side-by-side columns | They break on a 375px screen and lose reading order. |
 | Resolution | Status derived from the thread and always overridable | Automatic summaries | A confident wrong summary is worse than none, and you can't audit it. |
-| Dropped off | Absent from the latest reply of every branch | Absent from the newest message | The simple rule flags almost everyone in a forked thread. |
+| Dropped off | Absent from the latest reply of every branch | Absent from the newest message | The simpler rule would flag almost everyone in a forked thread. |
 | Offline | Send is blocked, with an explicit Queue for later | Queueing silently | Silently queueing text you think was sent is the worse failure. |
 
 The full reasoning, the research and the iteration history are in [docs/DESIGN.md](docs/DESIGN.md).

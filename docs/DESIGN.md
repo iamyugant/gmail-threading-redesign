@@ -96,8 +96,8 @@ Components: `MessageNode`, `MessageHeader`.
 |---|---|---|
 | **Vertical tree, indent capped at 3 (2 on phones), then a 2 px accent line + parent pill** | Canvas/node graph; side-by-side columns | Graphs are slow to read and useless at 375 px; columns collapse on small screens and hide order. A capped vertical tree keeps the *reading direction* email users already have, and degrades gracefully (I tested 120-deep chains). |
 | **Explicit, user-owned resolution (derived suggestion + manual override)** | Auto-generated summary of "what was decided" | Trust. A confident wrong summary is worse than none, and an enterprise reviewer needs to *audit* a decision. Derived statuses are deterministic and explainable ("answered by Maya in this reply"); the human can always overrule. An automatic summary can always be added later *on top of* this ledger. |
-| **Ledger shows open items first; resolved & decisions one click away** | Always show everything | Found in the critique loop: six rows pushed the conversation to 60 % down the screen. The ledger's job is "what needs someone", so it leads with that; the audit trail stays reachable. A row you just toggled stays visible so you can undo it. |
-| **"Dropped" = absent from *every* branch's latest reply** | "Not on the newest message" | The naive rule flags almost everyone in any forked thread. Measured against all branch tips it flags only people who are truly out of the loop. |
+| **Ledger shows open items first; resolved & decisions one click away** | Always show everything | Found in my screenshot review: six rows pushed the conversation below the fold. The ledger's job is "what needs someone", so it leads with that; the audit trail stays reachable. A row you just toggled stays visible so you can undo it. |
+| **"Dropped" = absent from *every* branch's latest reply** | "Not on the newest message" | I defined dropped as absent from the latest reply of every branch. The simpler rule, not on the newest message, would flag almost everyone in a forked thread, which teaches people to ignore the signal. |
 | **Offline: Send stays disabled (per PRD) *and* there's an explicit "Queue for later"** | Silent auto-queue on Send | Silent queueing on Ctrl+Enter would send text the user thinks is sent. Queueing is a visible, deliberate second action; the banner says what will happen. |
 | **Queued replies saved in the browser, with no outbox** | A real outbox | Queued replies persist in `localStorage` and send the next time the thread opens while online. They do not send in the background once the tab is closed. A real outbox needs retry, dedupe and auth, and a prototype can't show that honestly. |
 | **React via CDN, no build step** | Vite project | Zero setup for reviewers; the logic lives in a pure `src/threading.js` that Node tests `require()` directly. Babel compiles the JSX in the browser, which is fine for a prototype and would give way to a real bundler in production. |
@@ -108,7 +108,7 @@ Each row is what *actually* happened — including what the tests and screenshot
 
 ### Resolution ledger
 1. **Baseline** — derive item statuses in a pure `analyzeThread()`; chips + toggle.
-2. **Ergonomic/visual critique** (screenshots at 1440 and 375) — the ledger took ~380 px and pushed messages below the fold; on a phone the question text truncated to *"Can Sa…"* because chip + action crowded it. An in-browser contrast check measured the amber "open" chip at **4.34 : 1** (AA needs 4.5) → text darkened to `#a05600` (5.12). Keyboard parity gap → added `x`.
+2. **Ergonomic and visual critique.** In my screenshot review at 375px, the ledger pushed the conversation below the fold, and the question text truncated to *"Can Sa…"* because the status chip and the action link crowded it. The earlier amber text, `#b06000` on `#fef7e0`, measures 4.34:1, below the 4.5:1 AA minimum. I darkened it to `#a05600`, which measures 5.12:1. Keyboard parity was missing, so I added `x`.
 3. **Responsive/edge stress** — 0 items, 25 resolved items, 300 messages/100 questions. → progressive disclosure (open first, "Show 6 resolved & decisions"), "All caught up" state, mobile rows wrap (text on its own 2-line block, status below), toggled rows stay for undo.
 4. **Hardening** — `role="status"` announcements (*"Marked resolved: …"*), keyboard focus restored to the same control after the list re-sorts, no nested buttons (asserted), corrupt stored state ignored.
 
@@ -120,7 +120,7 @@ Each row is what *actually* happened — including what the tests and screenshot
 
 ### Audience drift
 1. **Baseline** — `recipientDelta(reply, parent)`, "dropped" avatars.
-2. **Critique** — first definition flagged nearly everyone (see trade-offs). Stress test with 600-character names found the badge **overflowed the card** → wraps. Amber only when the dropped person is still owed an answer, so colour carries meaning.
+2. **Critique.** A stress test with 600-character names showed the badge overflowing the card, so it now wraps. Amber appears only when the dropped person is still owed an answer, so the colour carries meaning.
 3. **Stress** — 40 participants sharing initials: `"Alex, Alex, Alex…"` was useless → collision-aware short names (full name when a first name clashes) and lists capped at 3 (+N more; full list stays in the tooltip).
 4. **Hardening** — badge is focusable with an `aria-label`; composer nudge is `role="note"`; time-placed messages get no delta (a delta against an arbitrary node would mislead).
 
@@ -130,9 +130,11 @@ Each row is what *actually* happened — including what the tests and screenshot
 - **Minimap** — ticks indent with depth; a grey band tracks what's on screen; click scrolls. Found: folded-away messages stayed "in view" (stale IntersectionObserver state).
 - **1-message thread** — no connectors, rail, overview, banners or "branch" language; reply promotes it to a real thread.
 
-## 8. Bugs the test suites caught (not cosmetic)
+## 8. Bugs found during the build
 
-A `//` comment that swallowed the rest of a line and blanked the app · indentation stopping one level late · `@@x` parsed as a mention · one bad message crashing the whole inbox · `recipientDelta` crashing on a missing `cc` · badge overflow with long names · offline hiding a validation message · stale minimap band · focus lost after send · 4.34 : 1 contrast · `"Alex, Alex"` ambiguity.
+Some were caught by failing tests and some by code review. Every one is now covered by a test.
+
+A `//` comment that swallowed the rest of a line and blanked the app · indentation stopping one level late · `@@x` parsed as a mention · one bad message crashing the whole inbox · `recipientDelta` crashing on a missing `cc` · badge overflow with long names · offline hiding a validation message · stale minimap band · focus lost after send · amber chip text below the 4.5:1 contrast minimum · `"Alex, Alex"` ambiguity.
 
 ## 9. Edge-case matrix
 
